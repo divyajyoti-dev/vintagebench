@@ -40,7 +40,7 @@ answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips,
   - Stratified on flips × as-of answer (5/5/5/5; the 2 UNRATE controls are 1 Yes,
     1 No). Controls whose computation window touches the COVID collapse
     (Mar–Jun 2020; 2020 Q1–Q3 for GDP) are excluded; flips there stay eligible.
-  - Non-UNRATE controls farther than a per-template cap (10 margins; 40 for PAYEMS) from the threshold in both vintages are excluded as trivial.
+  - Non-UNRATE controls farther than a per-template cap (10 margins; 5 for GDP shrink; 40 for PAYEMS) from the threshold in both vintages are excluded as trivial.
 - tasks/README.md: table of all tasks (question, as-of answer, revised answer, flips).
 
 ## 4. Harness

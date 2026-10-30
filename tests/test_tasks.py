@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import warnings
 from collections import Counter
 from datetime import date
@@ -588,7 +589,7 @@ def test_select_pilot_excludes_covid_controls_keeps_covid_flips() -> None:
     for i, ym in enumerate(months):
         for s, key in [("INDPRO", "mom-fall"), ("PAYEMS", "avg3m-above-150k"),
                        ("PCEPI", "yoy-above-2.5"), ("UNRATE", "mom-rise")]:  # fmt: skip
-            pool.append(_fake(s, key, ym, flips=False, yes=i % 2 == 0))
+            pool.append(_with_dist(_fake(s, key, ym, flips=False, yes=i % 2 == 0), 2.0, 3.0))
     covid = ["2020-03", "2020-04", "2020-05", "2020-06", "2020-07"]
     for j, ym in enumerate(covid):  # the only flips are inside COVID windows
         pool.append(_fake("INDPRO", "mom-rise-x", ym, flips=True, yes=j % 2 == 0))
@@ -615,10 +616,11 @@ def test_notes_report_pct_change_and_distance() -> None:
     assert "margin units: as-of 9.9010, revised 3.9604." in june.notes  # 4 decimals
 
 
-def test_trivial_control_just_over_cap() -> None:
-    # 10.0040 margins (e.g. +0.5002% vs a 0.05 margin) is over a cap of 10.
-    task = _with_dist(_fake("GDPC1", "qoq-shrink", "2021-07", flips=False), 10.004, 13.1)
-    assert tasks.trivial_control(task) is True
+@pytest.mark.parametrize(("as_of", "trivial"), [(10.000001, True), (10.0, False), (9.99999, False)])
+def test_trivial_control_compares_unrounded(as_of: float, trivial: bool) -> None:
+    # INDPRO cap is 10 margins; 10.000001 would display as 10.0000 in notes.
+    task = _with_dist(_fake("INDPRO", "mom-fall", "2021-07", flips=False), as_of, 13.1)
+    assert tasks.trivial_control(task) is trivial
 
 
 def test_prior_11_min_change() -> None:
@@ -629,8 +631,8 @@ def test_prior_11_min_change() -> None:
 
 
 def _with_dist(task: Task, as_of: float, revised: float) -> Task:
-    note = f"{tasks.DISTANCE_LABEL}: as-of {as_of:.4f}, revised {revised:.4f}."
-    return dataclasses.replace(task, notes=note)
+    tasks._attach_distances(task, (as_of, revised))  # as build_candidates does
+    return task
 
 
 @pytest.mark.parametrize(
@@ -644,6 +646,8 @@ def _with_dist(task: Task, as_of: float, revised: float) -> Task:
         ("PAYEMS", "avg3m-above-150k", (391.0, 380.0), False, True),
         ("PAYEMS", "weakest-12m", (40.5, 41.0), False, True),
         ("GDPC1", "qoq-shrink", (12.0, 11.0), False, True),
+        ("GDPC1", "qoq-shrink", (5.0, 9.0), False, False),  # shrink cap is 5: at the cap
+        ("GDPC1", "qoq-shrink", (5.01, 9.0), False, True),
         ("GDPC1", "growth-above-2", (9.0, 12.0), False, False),
         ("INDPRO", "mom-fall", (50.0, 50.0), True, False),  # flips exempt
         ("UNRATE", "mom-rise", (50.0, 50.0), False, False),  # UNRATE exempt
@@ -656,8 +660,34 @@ def test_trivial_control(
     assert tasks.trivial_control(task) is trivial
 
 
-def test_trivial_control_without_distance_is_kept() -> None:
-    assert tasks.trivial_control(_fake("INDPRO", "mom-fall", "2018-04", flips=False)) is False
+def test_trivial_control_without_distance_raises(tmp_path: Path) -> None:
+    task = _fake("INDPRO", "mom-fall", "2018-04", flips=False)  # capped, no distance
+    with pytest.raises(ValueError, match="cannot load vintages"):
+        tasks.trivial_control(task, root=tmp_path)  # no data to recompute from
+    # Uncapped or exempt tasks never need a distance.
+    assert tasks.trivial_control(_fake("UNRATE", "mom-rise", "2018-04", flips=False)) is False
+    assert tasks.trivial_control(_fake("INDPRO", "mom-fall", "2018-04", flips=True)) is False
+
+
+@pytest.mark.usefixtures("toy")
+def test_distances_recomputed_after_load(tmp_path: Path) -> None:
+    built = tasks.build_candidates(["TOY"], TOY_ROOT)
+    tasks.save_tasks(tmp_path / "t.jsonl", built)
+    assert "_threshold_distances" not in (tmp_path / "t.jsonl").read_text()
+    loaded = tasks.load_tasks(tmp_path / "t.jsonl")
+    assert loaded == built  # the distance is not a field
+    for b, lo in zip(built, loaded, strict=True):
+        assert tasks.threshold_distances(lo, root=TOY_ROOT) == tasks.threshold_distances(b)
+
+
+@pytest.mark.skipif(not (data.DATA_DIR / "GDPC1.parquet").exists(), reason="no vintage data")
+def test_every_capped_candidate_has_finite_distance() -> None:
+    cands = tasks.build_candidates(tasks.SERIES, data.DATA_DIR)
+    capped = [c for c in cands if (tp := tasks.template_for(c)) and tp.control_cap is not None]
+    assert len(capped) > 500
+    for c in capped:
+        d = tasks.threshold_distances(c, root=Path("/nonexistent"))  # must be attached
+        assert len(d) == 2 and all(math.isfinite(x) and x >= 1.0 - 1e-9 for x in d)
 
 
 def test_select_pilot_skips_trivial_controls() -> None:
@@ -679,7 +709,6 @@ def test_select_pilot_skips_trivial_controls() -> None:
     # UNRATE controls are exempt: far-from-the-line UNRATE tasks remain eligible.
     unrate = [t for t in controls if t.series_id == "UNRATE"]
     assert len(unrate) == 2
-    assert all(tasks.threshold_distances(t) is not None for t in unrate)
 
 
 def test_readme_escapes_pipes_in_cells() -> None:
