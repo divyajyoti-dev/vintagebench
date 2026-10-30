@@ -1,17 +1,21 @@
-# Models evaluated by `python -m vintagebench.run`. Fields map to ModelSpec (SPEC §5).
-# Verify current model IDs and prices in provider docs before adding entries.
-#
-# Example entries (prices in USD per million tokens):
-#
-# - provider: openai            # default OpenAI base URL
-#   model_id: <openai-model-id>
-#   price_in: 0.00              # USD per 1M input tokens
-#   price_out: 0.00             # USD per 1M output tokens
-#   native_tools: true
-#
-# - provider: together          # base_url https://api.together.xyz/v1
-#   model_id: <together-model-id>
-#   price_in: 0.00              # USD per 1M input tokens
-#   price_out: 0.00             # USD per 1M output tokens
-#   native_tools: false         # false -> plain-text JSON tool protocol
-[]
+# Pilot models (SPEC §7). Fields map to ModelSpec (SPEC §5); unknown keys are rejected.
+# Prices: USD per 1M tokens, standard tier. Checked 2026-10-30 via search summaries of
+# developers.openai.com (direct page fetches were blocked); re-check before the full run.
+# Model IDs confirmed with the free models.list() call.
+# reasoning_effort "none" keeps temperature=0 and native function calling available on
+# Chat Completions for GPT-6 Sol/Luna (developers.openai.com/api/docs/guides/latest-model).
+# Pricing: https://developers.openai.com/api/docs/pricing
+
+- provider: openai            # https://developers.openai.com/api/docs/models/gpt-6-sol
+  model_id: gpt-6-sol
+  price_in: 2.00
+  price_out: 10.00
+  native_tools: true
+  reasoning_effort: none
+
+- provider: openai            # https://developers.openai.com/api/docs/models/gpt-6-luna
+  model_id: gpt-6-luna
+  price_in: 0.10
+  price_out: 0.50
+  native_tools: true
+  reasoning_effort: none
