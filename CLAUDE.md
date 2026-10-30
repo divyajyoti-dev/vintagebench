@@ -11,7 +11,8 @@ later revised. Uses US economic data vintages from ALFRED (St. Louis Fed).
 - Never add Claude or Anthropic as an author or co-author. No "Co-Authored-By"
   trailers and no "Generated with Claude Code" lines in commits, PR titles or
   descriptions, code comments, or docs.
-- Never change git user config.
+- At session start, set repo-local git user.name to Divya Jyoti and user.email to
+  229231369+divyajyoti-dev@users.noreply.github.com. Never author or co-author commits as Claude.
 - Conventional commit messages (feat:, fix:, test:, docs:, chore:).
 - Work on a branch; one PR per session; never push to main.
 
