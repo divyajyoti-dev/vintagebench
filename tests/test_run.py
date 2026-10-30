@@ -7,6 +7,7 @@ import pytest
 from test_models import FakeClient, completion
 
 from vintagebench import models, run
+from vintagebench.tasks import Task
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REPO = Path(__file__).parents[1]
@@ -103,3 +104,28 @@ def test_model_run_stops_at_budget_cap(tmp_path, monkeypatch):
 def test_cli_rejects_missing_tasks(flag):
     with pytest.raises(SystemExit):
         run.parse_args(flag)
+
+
+def _task(i, asof, rev, answer_type="yes_no"):
+    return Task(f"t{i}", "TOY", "2021-01-15", "q?", answer_type, asof, "2021-02-15", rev,
+                asof != rev)  # fmt: skip
+
+
+def test_yes_share_line():
+    tasks = [_task(1, False, True), _task(2, True, True), _task(3, 0.4, 0.4, "number")]
+    assert run.yes_share_line(tasks) == (
+        "- yes share (2 yes/no tasks): gold_as_of = Yes 1/2 (50%), gold_revised = Yes "
+        "2/2 (100%); majority-class baseline: asof_correct 1/2 (50%), revised_correct "
+        "2/2 (100%)"
+    )
+    skewed = [_task(i, i == 0, i < 3) for i in range(4)]  # as-of 1/4 yes, revised 3/4 yes
+    line = run.yes_share_line(skewed)
+    assert "gold_as_of = Yes 1/4 (25%)" in line and "asof_correct 3/4 (75%)" in line
+    assert "revised_correct 3/4 (75%)" in line
+    assert run.yes_share_line([_task(1, 0.4, 0.4, "number")]) == "- yes share: no yes/no tasks"
+
+
+def test_summary_has_yes_share(tmp_path):
+    assert run.main(cli(tmp_path, "--trials", "1", "--sanity")) == 0
+    summary = (only_run_dir(tmp_path) / "summary.md").read_text()
+    assert "- yes share (2 yes/no tasks): gold_as_of = Yes 1/2 (50%)" in summary
