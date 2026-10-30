@@ -194,16 +194,22 @@ def test_templates_cover_spec_series_with_round_thresholds() -> None:
     assert set(tasks.TEMPLATES) == {"GDPC1", "PAYEMS", "INDPRO", "PCEPI", "UNRATE"}
     t = T("2020-03-01")
     q = tasks.TEMPLATES["PAYEMS"][1].question(t)
-    assert "3 months ending March 2020 above 100k" in q and "January 2020" in q
+    assert "3 months ending March 2020 above 100k" in q
+    assert "(level(March 2020) - level(December 2019)) / 3 above 100" in q
+    assert "in thousands of jobs" in q
     assert "above 150k" in tasks.TEMPLATES["PAYEMS"][2].question(t)
     assert "Q2 2020" in tasks.TEMPLATES["GDPC1"][0].question(T("2020-04-01"))
     assert "Q1 2020" in tasks.TEMPLATES["GDPC1"][0].question(T("2020-04-01"))
     pce_q = tasks.TEMPLATES["PCEPI"][0].question(t)
     assert pce_q.startswith("Is PCE inflation (year over year) above 2.5% for March 2020")
-    assert "March 2019 to March 2020 above 2.5%" in pce_q and "as of" not in pce_q
+    assert "from March 2019 to March 2020, 100 * (level(March 2020) / level(March 2019) - 1)" in (
+        pce_q
+    )
+    assert "as of" not in pce_q
     weak_q = tasks.TEMPLATES["PAYEMS"][0].question(t)
     assert weak_q.startswith("Was March 2020 the weakest of the 12 months ending in March 2020")
-    assert "each of the 11 months before it" in weak_q
+    assert "change(April 2019) through change(February 2020)" in weak_q
+    assert "level(month) - level(previous month)" in weak_q and "thousands of jobs" in weak_q
 
 
 def test_revision_date_rule() -> None:
@@ -595,3 +601,86 @@ def test_select_pilot_excludes_covid_controls_keeps_covid_flips() -> None:
     assert sum(t.flips for t in pilot) == 10  # COVID flips remain eligible
     # Sanity: the pool did contain eligible-looking COVID controls.
     assert any(not t.flips and tasks.covid_window_overlap(t) for t in pool)
+
+
+# --- notes and non-trivial controls -------------------------------------------
+
+
+@pytest.mark.usefixtures("toy")
+def test_notes_report_pct_change_and_distance() -> None:
+    june = {c.id: c for c in tasks.build_candidates(["TOY"], TOY_ROOT)}["toy-mom-fall-2020-06"]
+    assert "one-month % change: as-of 0.495, revised -0.198." in june.notes
+    # |% change| / 0.05: 0.4951 / 0.05 = 9.90; 0.198 / 0.05 = 3.96
+    assert tasks.threshold_distances(june) == pytest.approx((9.90, 3.96), abs=0.01)
+    assert "margin units: as-of 9.9010, revised 3.9604." in june.notes  # 4 decimals
+
+
+def test_trivial_control_just_over_cap() -> None:
+    # 10.0040 margins (e.g. +0.5002% vs a 0.05 margin) is over a cap of 10.
+    task = _with_dist(_fake("GDPC1", "qoq-shrink", "2021-07", flips=False), 10.004, 13.1)
+    assert tasks.trivial_control(task) is True
+
+
+def test_prior_11_min_change() -> None:
+    base = [200, 180, 250, 90, 300, 210, 160, 220, 150, 175, 205]
+    s = _levels_from_changes(base + [70])
+    assert tasks.prior_11_min_change(s, T("2020-01-01")) == 90
+    assert tasks.prior_11_min_change(s.iloc[3:], T("2020-01-01")) is None
+
+
+def _with_dist(task: Task, as_of: float, revised: float) -> Task:
+    note = f"{tasks.DISTANCE_LABEL}: as-of {as_of:.4f}, revised {revised:.4f}."
+    return dataclasses.replace(task, notes=note)
+
+
+@pytest.mark.parametrize(
+    ("series", "key", "dists", "flips", "trivial"),
+    [
+        ("INDPRO", "mom-fall", (10.0, 10.0), False, False),  # at the cap: kept
+        ("INDPRO", "mom-fall", (10.01, 30.0), False, True),  # over the cap in both
+        ("INDPRO", "mom-fall", (30.0, 9.0), False, False),  # close in one vintage
+        ("PCEPI", "yoy-above-2.5", (19.2, 19.0), False, True),
+        ("PAYEMS", "avg3m-above-150k", (39.0, 41.0), False, False),
+        ("PAYEMS", "avg3m-above-150k", (391.0, 380.0), False, True),
+        ("PAYEMS", "weakest-12m", (40.5, 41.0), False, True),
+        ("GDPC1", "qoq-shrink", (12.0, 11.0), False, True),
+        ("GDPC1", "growth-above-2", (9.0, 12.0), False, False),
+        ("INDPRO", "mom-fall", (50.0, 50.0), True, False),  # flips exempt
+        ("UNRATE", "mom-rise", (50.0, 50.0), False, False),  # UNRATE exempt
+    ],
+)
+def test_trivial_control(
+    series: str, key: str, dists: tuple[float, float], flips: bool, trivial: bool
+) -> None:
+    task = _with_dist(_fake(series, key, "2018-04", flips=flips), *dists)
+    assert tasks.trivial_control(task) is trivial
+
+
+def test_trivial_control_without_distance_is_kept() -> None:
+    assert tasks.trivial_control(_fake("INDPRO", "mom-fall", "2018-04", flips=False)) is False
+
+
+def test_select_pilot_skips_trivial_controls() -> None:
+    pool = []
+    months = [f"{y}-{m:02d}" for y in range(2016, 2020) for m in range(1, 13)]
+    for i, ym in enumerate(months):
+        far = i % 2 == 0  # half the controls are far from the line in both vintages
+        for s, key in [("INDPRO", "mom-fall"), ("PCEPI", "yoy-above-2.5"),
+                       ("PAYEMS", "avg3m-above-150k"), ("UNRATE", "mom-rise")]:  # fmt: skip
+            d = (100.0, 100.0) if far else (2.0, 3.0)
+            pool.append(_with_dist(_fake(s, key, ym, flips=False, yes=(i // 2) % 2 == 0), *d))
+        pool.append(_fake("GDPC1", "growth-above-2", ym, flips=True, yes=i % 2 == 0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pilot = tasks.select_pilot(pool, n=20, seed=0)
+    controls = [t for t in pilot if not t.flips]
+    assert len(controls) == 10
+    assert not any(tasks.trivial_control(t) for t in controls)
+    # UNRATE controls are exempt: far-from-the-line UNRATE tasks remain eligible.
+    unrate = [t for t in controls if t.series_id == "UNRATE"]
+    assert len(unrate) == 2
+    assert all(tasks.threshold_distances(t) is not None for t in unrate)
+
+
+def test_readme_escapes_pipes_in_cells() -> None:
+    assert tasks._cell("|a - b| >= 1") == "\\|a - b\\| >= 1"
