@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -197,7 +198,12 @@ def test_templates_cover_spec_series_with_round_thresholds() -> None:
     assert "above 150k" in tasks.TEMPLATES["PAYEMS"][2].question(t)
     assert "Q2 2020" in tasks.TEMPLATES["GDPC1"][0].question(T("2020-04-01"))
     assert "Q1 2020" in tasks.TEMPLATES["GDPC1"][0].question(T("2020-04-01"))
-    assert "March 2019 to March 2020 above 2.5%" in tasks.TEMPLATES["PCEPI"][0].question(t)
+    pce_q = tasks.TEMPLATES["PCEPI"][0].question(t)
+    assert pce_q.startswith("Is PCE inflation (year over year) above 2.5% for March 2020")
+    assert "March 2019 to March 2020 above 2.5%" in pce_q and "as of" not in pce_q
+    weak_q = tasks.TEMPLATES["PAYEMS"][0].question(t)
+    assert weak_q.startswith("Was March 2020 the weakest of the 12 months ending in March 2020")
+    assert "each of the 11 months before it" in weak_q
 
 
 def test_revision_date_rule() -> None:
@@ -273,16 +279,16 @@ def test_build_candidates_unknown_series() -> None:
 # --- select_pilot -----------------------------------------------------------
 
 
-def _fake(series: str, key: str, ym: str, flips: bool) -> Task:
+def _fake(series: str, key: str, ym: str, flips: bool, yes: bool = True) -> Task:
     return Task(
         id=f"{series.lower()}-{key}-{ym}",
         series_id=series,
         as_of_date=f"{ym}-28",
         question=f"{series} {key} {ym}?",
         answer_type="yes_no",
-        gold_as_of=True,
+        gold_as_of=yes,
         revision_date=f"{int(ym[:4]) + 1}{ym[4:]}-28",
-        gold_revised=not flips,
+        gold_revised=yes != flips,
         flips=flips,
     )
 
@@ -297,8 +303,8 @@ def _pool(flip_every: int = 3) -> list[Task]:
             for s, ks in keys.items():
                 for k in ks:
                     i += 1
-                    out.append(_fake(s, k, ym, flips=i % flip_every == 0))
-            out.append(_fake("UNRATE", "r", ym, flips=False))
+                    out.append(_fake(s, k, ym, flips=i % flip_every == 0, yes=i % 2 == 0))
+            out.append(_fake("UNRATE", "r", ym, flips=False, yes=month in (1, 7)))
     return out
 
 
@@ -316,6 +322,20 @@ def test_select_pilot_balance_and_spread() -> None:
     assert len(years) >= 8
     assert len({(t.series_id, t.id[-7:]) for t in pilot}) == 20  # one task per target
     assert all(2016 <= int(y) <= 2025 for y in years)
+    # Stratified on (flips, gold_as_of): half Yes within flips and within controls.
+    cells = Counter((t.flips, t.gold_as_of) for t in pilot)
+    assert cells == {(True, True): 5, (True, False): 5, (False, True): 5, (False, False): 5}
+    unrate = [t for t in pilot if t.series_id == "UNRATE"]
+    assert sorted(t.gold_as_of for t in unrate) == [False, True]
+
+
+def test_select_pilot_short_stratum_warns_and_uses_sibling() -> None:
+    pool = [t for t in _pool() if not (t.flips and t.gold_as_of)]  # no flip/as-of Yes
+    with pytest.warns(UserWarning, match=r"flip/as-of Yes 0/5"):
+        pilot = tasks.select_pilot(pool, n=20, seed=0)
+    assert len(pilot) == 20
+    assert sum(t.flips for t in pilot) == 10  # sibling stratum keeps flips at 10
+    assert sum(t.series_id == "UNRATE" for t in pilot) == 2
 
 
 def test_select_pilot_deterministic_and_seeded() -> None:
@@ -335,7 +355,9 @@ def test_select_pilot_short_on_flips_warns() -> None:
 
 def test_select_pilot_excludes_out_of_range_years() -> None:
     pool = _pool() + [_fake("INDPRO", "f", "2015-06", flips=True)]
-    pilot = tasks.select_pilot(pool, n=40, seed=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pilot = tasks.select_pilot(pool, n=40, seed=0)
     assert all(not t.id.endswith("2015-06") for t in pilot)
 
 
@@ -377,3 +399,76 @@ def test_skips_targets_first_seen_in_pre_2016_baseline(monkeypatch: pytest.Monke
     assert len(tasks.build_candidates(["TOY"], TOY_ROOT)) == 11
     monkeypatch.setattr(tasks, "BASELINE_CUTOFF", date(2021, 2, 1))
     assert tasks.build_candidates(["TOY"], TOY_ROOT) == []
+
+
+# --- materiality margins ------------------------------------------------------
+
+
+def test_pct_change() -> None:
+    s = monthly([200.0, 201.0])
+    assert tasks.pct_change(s, T("2020-02-01")) == pytest.approx(0.5)
+    assert tasks.pct_change(s, T("2020-01-01")) is None
+
+
+@pytest.mark.parametrize(
+    ("level", "kept"),
+    [(100.05, True), (100.049, False), (99.95, True), (99.951, False), (100.0, False)],
+)
+def test_indpro_margin_boundary(level: float, kept: bool) -> None:
+    s = monthly([100.0, level])  # % change = level - 100
+    assert tasks.is_material(tasks.mom_pct_margin(s, T("2020-02-01")), 0.05) is kept
+
+
+@pytest.mark.parametrize(("level", "kept"), [(100.05, True), (100.04, False), (99.94, True)])
+def test_gdp_margin_boundary(level: float, kept: bool) -> None:
+    s = quarterly([100.0, level])
+    assert tasks.is_material(tasks.gdp_margin(s, T("2020-04-01")), 0.05) is kept
+
+
+@pytest.mark.parametrize(
+    ("latest", "kept"),
+    [(102.55, True), (102.45, True), (102.54, False), (102.46, False), (102.5137, False)],
+)
+def test_pce_margin_boundary(latest: float, kept: bool) -> None:
+    s = monthly([100.0] * 12 + [latest])  # YoY = latest - 100
+    assert tasks.is_material(tasks.pce_margin(s, T("2021-01-01"), 2.5), 0.05) is kept
+
+
+@pytest.mark.parametrize(
+    ("total", "kept"), [(453, True), (447, True), (452, False), (448, False), (450, False)]
+)
+def test_payrolls_3m_margin_boundary(total: int, kept: bool) -> None:
+    s = monthly([150_000, 150_100, 150_200, 150_000 + total])  # avg = total / 3 vs 150
+    assert tasks.is_material(tasks.payrolls_3m_margin(s, T("2020-04-01"), 150), 1.0) is kept
+
+
+@pytest.mark.parametrize(
+    ("this", "kept"), [(89, True), (91, True), (89.5, False), (90.5, False), (90, False)]
+)
+def test_payrolls_weakest_margin_boundary(this: float, kept: bool) -> None:
+    base = [200, 180, 250, 90, 300, 210, 160, 220, 150, 175, 205]  # min = 90
+    s = _levels_from_changes(base + [this])
+    assert tasks.is_material(tasks.payrolls_weakest_margin(s, T("2020-01-01")), 1.0) is kept
+
+
+def test_margins_missing_data() -> None:
+    assert tasks.is_material(None, 0.05) is False
+    assert tasks.mom_pct_margin(monthly([100.0]), T("2020-01-01")) is None
+    assert tasks.payrolls_weakest_margin(monthly([1.0, 2.0]), T("2020-02-01")) is None
+
+
+@pytest.mark.usefixtures("toy")
+def test_build_candidates_drops_immaterial(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TOY one-month % changes are all >= ~0.2% in both vintages: nothing dropped at 0.05.
+    assert len(tasks.build_candidates(["TOY"], TOY_ROOT)) == 11
+    # Raising the margin to 0.3% drops months clear by less (e.g. Apr +0.198%), and June
+    # (as-of +0.495%, revised -0.198%) is dropped because the revised vintage is too close.
+    strict = dataclasses.replace(tasks.fell_vs_prior_month_template("TOY"), min_margin=0.3)
+    monkeypatch.setitem(tasks.TEMPLATES, "TOY", (strict,))
+    ids = {c.id for c in tasks.build_candidates(["TOY"], TOY_ROOT)}
+    assert "toy-mom-fall-2020-04" not in ids and "toy-mom-fall-2020-06" not in ids
+    assert "toy-mom-fall-2020-03" in ids  # +0.498% in both vintages
+    assert all(
+        "Kept only if, in both vintages" in c.notes
+        for c in tasks.build_candidates(["TOY"], TOY_ROOT)
+    )
