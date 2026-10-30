@@ -55,14 +55,19 @@ def test_get_series_serves_only_as_of_data_within_range():
     assert len(episode.get_series({"series_id": "toy"}, "2021-01-15", ROOT)["observations"]) == 12
 
 
-def test_get_series_includes_static_metadata():
+TOY_METADATA = {"title": "Toy test series", "units": "Index", "frequency": "Monthly"}
+
+
+@pytest.fixture
+def toy_metadata(monkeypatch):
+    """Register test-only metadata for the TOY fixture series."""
+    monkeypatch.setitem(episode.SERIES_METADATA, "TOY", dict(TOY_METADATA))
+
+
+def test_get_series_includes_static_metadata(toy_metadata):
     early = episode.get_series(JUNE_ARGS, "2021-01-15", ROOT)
     late = episode.get_series(JUNE_ARGS, "2021-03-15", ROOT)
-    assert early["metadata"] == {
-        "title": "Toy test series",
-        "units": "Index",
-        "frequency": "Monthly",
-    }
+    assert early["metadata"] == TOY_METADATA
     assert early["metadata"] == late["metadata"]  # vintage-independent
     assert list(early) == ["series_id", "as_of", "metadata", "observations"]
     assert "metadata" in episode.GET_SERIES["function"]["description"]
@@ -70,14 +75,14 @@ def test_get_series_includes_static_metadata():
 
 def test_series_metadata_table():
     meta = episode.SERIES_METADATA
-    assert set(meta) == {"PAYEMS", "GDPC1", "PCEPI", "INDPRO", "UNRATE", "TOY"}
+    assert set(meta) == {"PAYEMS", "GDPC1", "PCEPI", "INDPRO", "UNRATE"}  # no TOY
     assert meta["PAYEMS"]["units"] == "Thousands of Persons"
     assert meta["GDPC1"]["units"] == "Billions of Chained Dollars"
     assert meta["GDPC1"]["frequency"] == "Quarterly"
     assert meta["GDPC1"]["seasonal_adjustment"] == "Seasonally Adjusted Annual Rate"
     assert meta["PCEPI"]["units"] == meta["INDPRO"]["units"] == "Index"
     assert meta["UNRATE"]["units"] == "Percent"
-    for sid, m in meta.items():
+    for sid, m in {**meta, "TOY": TOY_METADATA}.items():
         text = " ".join(m.values())
         assert not any(ch.isdigit() for ch in text), sid  # no base years or dates
         assert "revis" not in text.lower() and "vintage" not in text.lower()
@@ -87,6 +92,8 @@ def test_series_without_metadata_gets_no_block(tmp_path):
     (tmp_path / "OTHER.parquet").write_bytes((ROOT / "TOY.parquet").read_bytes())
     r = episode.get_series({"series_id": "OTHER"}, "2021-01-15", tmp_path)
     assert "metadata" not in r and "error" not in r and len(r["observations"]) == 12
+    toy = episode.get_series({"series_id": "TOY"}, "2021-01-15", ROOT)  # not registered
+    assert "metadata" not in toy and len(toy["observations"]) == 12
 
 
 def test_get_series_errors_are_returned_not_raised():
