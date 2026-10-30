@@ -32,7 +32,9 @@ GET_SERIES: ToolSpec = {
         "name": "get_series",
         "description": (
             "Return observations of an economic data series as published on or before "
-            "today, for observation dates in [start, end]."
+            "today, for observation dates in [start, end]. For known series the result also "
+            "has a 'metadata' object with the series title, units, frequency and seasonal "
+            "adjustment."
         ),
         "parameters": {
             "type": "object",
@@ -46,6 +48,44 @@ GET_SERIES: ToolSpec = {
     },
 }
 TOOLS: list[ToolSpec] = [GET_SERIES]
+
+# Static, vintage-independent series metadata returned with get_series results (FRED
+# titles/units). Index and chained-dollar base years change across vintages (e.g.
+# 2012 -> 2017), so no base year is stated. Series not listed here get no metadata block.
+_SA = "Seasonally Adjusted"
+SERIES_METADATA: dict[str, dict[str, str]] = {
+    "PAYEMS": {
+        "title": "All Employees, Total Nonfarm",
+        "units": "Thousands of Persons",
+        "frequency": "Monthly",
+        "seasonal_adjustment": _SA,
+    },
+    "GDPC1": {
+        "title": "Real Gross Domestic Product",
+        "units": "Billions of Chained Dollars",
+        "frequency": "Quarterly",
+        "seasonal_adjustment": "Seasonally Adjusted Annual Rate",
+    },
+    "PCEPI": {
+        "title": "Personal Consumption Expenditures: Chain-type Price Index",
+        "units": "Index",
+        "frequency": "Monthly",
+        "seasonal_adjustment": _SA,
+    },
+    "INDPRO": {
+        "title": "Industrial Production: Total Index",
+        "units": "Index",
+        "frequency": "Monthly",
+        "seasonal_adjustment": _SA,
+    },
+    "UNRATE": {
+        "title": "Unemployment Rate",
+        "units": "Percent",
+        "frequency": "Monthly",
+        "seasonal_adjustment": _SA,
+    },
+    "TOY": {"title": "Toy test series", "units": "Index", "frequency": "Monthly"},
+}
 
 SYSTEM_PROMPT = """Today is {as_of_date}. You are an economic data analyst.
 Use the get_series tool to look up data. Base your answers only on data that has been \
@@ -118,7 +158,8 @@ def get_series(args: dict[str, Any], as_of: str, root: Path) -> dict[str, Any]:
     """Serve ``series_id`` as known on ``as_of``, restricted to observations in [start, end].
 
     Uses only ``data.get_as_of``, so values from later vintages can never be served.
-    Errors are returned to the model as ``{"error": ...}``, never raised.
+    Known series also get a static ``metadata`` block (SERIES_METADATA). Errors are
+    returned to the model as ``{"error": ...}``, never raised.
     """
     try:
         series_id = str(args["series_id"]).strip().upper()
@@ -133,7 +174,11 @@ def get_series(args: dict[str, Any], as_of: str, root: Path) -> dict[str, Any]:
         for d, v in known.items()
         if (start is None or d >= start) and (end is None or d <= end)
     ]
-    return {"series_id": series_id, "as_of": as_of, "observations": obs}
+    result: dict[str, Any] = {"series_id": series_id, "as_of": as_of}
+    if series_id in SERIES_METADATA:
+        result["metadata"] = dict(SERIES_METADATA[series_id])
+    result["observations"] = obs
+    return result
 
 
 def _run_tool(call: dict[str, Any], as_of: str, root: Path) -> dict[str, Any]:
