@@ -1,0 +1,83 @@
+{
+ "provider": "openai",
+ "settings": {
+  "temperature": 0.0,
+  "temperature_sent": true,
+  "reasoning_effort": "none"
+ },
+ "request": {
+  "model": "gpt-6-sol",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Today is 2017-09-15. You are an economic data analyst.\nUse the get_series tool to look up data. Base your answers only on data that has been published as of the date the tool serves; do not use figures you may remember from later releases.\n\nWhen answering a question, reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1 that your answer is correct>, \"values_used\": {\"YYYY-MM-DD\": <series value>, ...}, \"caveats\": \"<short text>\"}\nvalues_used must list the exact series values you relied on, keyed by observation date.\n\nIf you are later told that a new data release is available, look up the data again and reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1>, \"changed\": <true if your answer changed, else false>, \"reason\": \"<short text>\"}"
+   },
+   {
+    "role": "user",
+    "content": "Question: Did industrial production (INDPRO) fall in August 2017 versus the prior month, i.e. was its level in August 2017 lower than in July 2017?\nSeries: INDPRO"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_24Ogp6WzZeC0FFldrwspPlZj",
+      "type": "function",
+      "function": {
+       "name": "get_series",
+       "arguments": "{\"series_id\": \"INDPRO\", \"start\": \"2017-07-01\", \"end\": \"2017-08-01\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_24Ogp6WzZeC0FFldrwspPlZj",
+    "name": "get_series",
+    "content": "{\"series_id\": \"INDPRO\", \"as_of\": \"2017-09-15\", \"metadata\": {\"title\": \"Industrial Production: Total Index\", \"units\": \"Index\", \"frequency\": \"Monthly\", \"seasonal_adjustment\": \"Seasonally Adjusted\"}, \"observations\": [{\"date\": \"2017-07-01\", \"value\": 105.6886}, {\"date\": \"2017-08-01\", \"value\": 104.739}]}"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_series",
+     "description": "Return observations of an economic data series as published on or before today, for observation dates in [start, end]. For known series the result also has a 'metadata' object with the series title, units, frequency and seasonal adjustment.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "series_id": {
+        "type": "string",
+        "description": "FRED series ID, e.g. PAYEMS"
+       },
+       "start": {
+        "type": "string",
+        "description": "first observation date YYYY-MM-DD"
+       },
+       "end": {
+        "type": "string",
+        "description": "last observation date YYYY-MM-DD"
+       }
+      },
+      "required": [
+       "series_id",
+       "start",
+       "end"
+      ]
+     }
+    }
+   }
+  ],
+  "temperature": 0.0,
+  "reasoning_effort": "none",
+  "max_completion_tokens": 2048
+ },
+ "response": {
+  "text": "{\"answer\":\"yes\",\"confidence\":0.99,\"values_used\":{\"2017-07-01\":105.6886,\"2017-08-01\":104.739},\"caveats\":\"As published on 2017-09-15; subject to revision.\"}",
+  "tool_calls": [],
+  "input_tokens": 599,
+  "output_tokens": 60,
+  "cost_usd": 0.001798,
+  "cached": false
+ }
+}
