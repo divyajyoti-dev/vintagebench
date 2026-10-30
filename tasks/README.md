@@ -20,39 +20,53 @@ hand. Gold answers are computed programmatically from two vintages (SPEC §3).
 ## Templates
 
 Comparisons are strict; exact ties count as No. Candidates with any needed
-observation missing in either vintage are skipped.
+observation missing in either vintage are skipped. Materiality margin: a
+candidate is kept only if, in BOTH vintages, the deciding quantity is clear of
+its threshold by at least half the publication unit (column below), so no gold
+answer hinges on a difference below published precision. Counts are after
+this filter.
 
-| template | definition | candidates | flips |
-|---|---|---|---|
-| gdpc1-qoq-shrink (GDPC1) | yes iff level(q) < level(q-1 quarter); a tie is no. | 40 | 0 |
-| indpro-mom-fall (INDPRO) | yes iff level(t) < level(t-1 month); a tie is no. | 120 | 18 |
-| payems-avg3m-above-100k (PAYEMS) | PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > 100; a tie is no. | 120 | 9 |
-| payems-avg3m-above-150k (PAYEMS) | PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > 150; a tie is no. | 120 | 17 |
-| payems-weakest-12m (PAYEMS) | yes iff change(t) is strictly lower than each of change(t-1) .. change(t-11), where change(m) = level(m) - level(m-1); any tie is no. | 120 | 13 |
-| pcepi-yoy-above-2.5 (PCEPI) | yes iff 100 * (level(t) / level(t-12 months) - 1) > 2.5, unrounded. | 120 | 5 |
-| unrate-mom-rise (UNRATE) | yes iff round(rate(t), 1) > round(rate(t-1 month), 1); equal is no. | 118 | 12 |
+| template | definition | materiality margin (both vintages) | candidates | flips |
+|---|---|---|---|---|
+| gdpc1-qoq-shrink (GDPC1) | yes iff level(q) < level(q-1 quarter); a tie is no. | |100 * (level(q) / level(q-1 quarter) - 1)| >= 0.05 | 40 | 0 |
+| indpro-mom-fall (INDPRO) | yes iff level(t) < level(t-1 month); a tie is no. | |100 * (level(t) / level(t-1 month) - 1)| >= 0.05 | 106 | 11 |
+| payems-avg3m-above-100k (PAYEMS) | PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > 100; a tie is no. | |3-month average - 100| >= 1 (thousand) | 120 | 9 |
+| payems-avg3m-above-150k (PAYEMS) | PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > 150; a tie is no. | |3-month average - 150| >= 1 (thousand) | 115 | 14 |
+| payems-weakest-12m (PAYEMS) | yes iff change(t) is strictly lower than each of change(t-1) .. change(t-11), where change(m) = level(m) - level(m-1); any tie is no. | |change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand) | 120 | 13 |
+| pcepi-yoy-above-2.5 (PCEPI) | yes iff 100 * (level(t) / level(t-12 months) - 1) > 2.5, unrounded. | |12-month % change - 2.5| >= 0.05 (percentage points) | 111 | 2 |
+| unrate-mom-rise (UNRATE) | yes iff round(rate(t), 1) > round(rate(t-1 month), 1); equal is no. | none (compared at the published 0.1 precision) | 118 | 12 |
+
+## Answer balance (pilot)
+
+| | as-of Yes | as-of No |
+|---|---|---|
+| flips | 5 | 5 |
+| controls | 5 | 5 |
+
+- Share of Yes: as-of 10/20 (50%); revised 10/20 (50%).
+- Majority-class baseline (always answer the more common gold): as-of 10/20 (50%), revised 10/20 (50%).
 
 ## Pilot tasks
 
 | id | question | as-of answer | revised answer | flips |
 |---|---|---|---|---|
-| gdpc1-qoq-shrink-2016-07 | Did real GDP shrink in Q3 2016, i.e. was real GDP (GDPC1) in Q3 2016 lower than in Q2 2016? | No | No | no |
 | gdpc1-qoq-shrink-2017-07 | Did real GDP shrink in Q3 2017, i.e. was real GDP (GDPC1) in Q3 2017 lower than in Q2 2017? | No | No | no |
-| gdpc1-qoq-shrink-2018-07 | Did real GDP shrink in Q3 2018, i.e. was real GDP (GDPC1) in Q3 2018 lower than in Q2 2018? | No | No | no |
-| gdpc1-qoq-shrink-2023-07 | Did real GDP shrink in Q3 2023, i.e. was real GDP (GDPC1) in Q3 2023 lower than in Q2 2023? | No | No | no |
-| indpro-mom-fall-2021-08 | Did industrial production (INDPRO) fall in August 2021 versus the prior month, i.e. was its level in August 2021 lower than in July 2021? | No | Yes | yes |
-| indpro-mom-fall-2022-03 | Did industrial production (INDPRO) fall in March 2022 versus the prior month, i.e. was its level in March 2022 lower than in February 2022? | No | No | no |
-| indpro-mom-fall-2022-05 | Did industrial production (INDPRO) fall in May 2022 versus the prior month, i.e. was its level in May 2022 lower than in April 2022? | No | Yes | yes |
-| indpro-mom-fall-2025-04 | Did industrial production (INDPRO) fall in April 2025 versus the prior month, i.e. was its level in April 2025 lower than in March 2025? | Yes | No | yes |
-| payems-avg3m-above-100k-2017-09 | Was average monthly payroll growth over the 3 months ending September 2017 above 100k, i.e. was the average monthly change in total nonfarm payrolls (PAYEMS) from July 2017 through September 2017 above 100,000 jobs? | No | Yes | yes |
-| payems-avg3m-above-100k-2020-07 | Was average monthly payroll growth over the 3 months ending July 2020 above 100k, i.e. was the average monthly change in total nonfarm payrolls (PAYEMS) from May 2020 through July 2020 above 100,000 jobs? | Yes | Yes | no |
+| gdpc1-qoq-shrink-2020-04 | Did real GDP shrink in Q2 2020, i.e. was real GDP (GDPC1) in Q2 2020 lower than in Q1 2020? | Yes | Yes | no |
+| indpro-mom-fall-2017-07 | Did industrial production (INDPRO) fall in July 2017 versus the prior month, i.e. was its level in July 2017 lower than in June 2017? | No | Yes | yes |
+| indpro-mom-fall-2019-03 | Did industrial production (INDPRO) fall in March 2019 versus the prior month, i.e. was its level in March 2019 lower than in February 2019? | Yes | No | yes |
+| indpro-mom-fall-2022-12 | Did industrial production (INDPRO) fall in December 2022 versus the prior month, i.e. was its level in December 2022 lower than in November 2022? | Yes | Yes | no |
+| indpro-mom-fall-2023-09 | Did industrial production (INDPRO) fall in September 2023 versus the prior month, i.e. was its level in September 2023 lower than in August 2023? | No | No | no |
+| indpro-mom-fall-2025-07 | Did industrial production (INDPRO) fall in July 2025 versus the prior month, i.e. was its level in July 2025 lower than in June 2025? | Yes | No | yes |
+| indpro-mom-fall-2025-11 | Did industrial production (INDPRO) fall in November 2025 versus the prior month, i.e. was its level in November 2025 lower than in October 2025? | No | Yes | yes |
+| payems-avg3m-above-100k-2020-05 | Was average monthly payroll growth over the 3 months ending May 2020 above 100k, i.e. was the average monthly change in total nonfarm payrolls (PAYEMS) from March 2020 through May 2020 above 100,000 jobs? | No | No | no |
+| payems-avg3m-above-100k-2025-06 | Was average monthly payroll growth over the 3 months ending June 2025 above 100k, i.e. was the average monthly change in total nonfarm payrolls (PAYEMS) from April 2025 through June 2025 above 100,000 jobs? | Yes | No | yes |
 | payems-avg3m-above-150k-2016-06 | Was average monthly payroll growth over the 3 months ending June 2016 above 150k, i.e. was the average monthly change in total nonfarm payrolls (PAYEMS) from April 2016 through June 2016 above 150,000 jobs? | No | Yes | yes |
-| payems-avg3m-above-150k-2019-07 | Was average monthly payroll growth over the 3 months ending July 2019 above 150k, i.e. was the average monthly change in total nonfarm payrolls (PAYEMS) from May 2019 through July 2019 above 150,000 jobs? | No | Yes | yes |
-| payems-weakest-12m-2023-06 | Was June 2023 the weakest month for payroll growth in the prior 12 months, i.e. was the monthly change in total nonfarm payrolls (PAYEMS) in June 2023 lower than in each of the 11 months before it? | Yes | No | yes |
-| pcepi-yoy-above-2.5-2019-03 | Is PCE inflation (year over year) above 2.5% as of March 2019, i.e. is the unrounded 12-month percent change in the PCE price index (PCEPI) from March 2018 to March 2019 above 2.5%? | No | No | no |
-| pcepi-yoy-above-2.5-2021-04 | Is PCE inflation (year over year) above 2.5% as of April 2021, i.e. is the unrounded 12-month percent change in the PCE price index (PCEPI) from April 2020 to April 2021 above 2.5%? | Yes | Yes | no |
-| pcepi-yoy-above-2.5-2024-02 | Is PCE inflation (year over year) above 2.5% as of February 2024, i.e. is the unrounded 12-month percent change in the PCE price index (PCEPI) from February 2023 to February 2024 above 2.5%? | No | Yes | yes |
-| pcepi-yoy-above-2.5-2024-06 | Is PCE inflation (year over year) above 2.5% as of June 2024, i.e. is the unrounded 12-month percent change in the PCE price index (PCEPI) from June 2023 to June 2024 above 2.5%? | Yes | No | yes |
-| pcepi-yoy-above-2.5-2024-07 | Is PCE inflation (year over year) above 2.5% as of July 2024, i.e. is the unrounded 12-month percent change in the PCE price index (PCEPI) from July 2023 to July 2024 above 2.5%? | No | Yes | yes |
-| unrate-mom-rise-2018-07 | Did the unemployment rate (UNRATE) rise in July 2018 versus the prior month, i.e. was it higher than in June 2018 (as published, to one decimal place)? | No | No | no |
-| unrate-mom-rise-2020-12 | Did the unemployment rate (UNRATE) rise in December 2020 versus the prior month, i.e. was it higher than in November 2020 (as published, to one decimal place)? | No | No | no |
+| payems-avg3m-above-150k-2024-12 | Was average monthly payroll growth over the 3 months ending December 2024 above 150k, i.e. was the average monthly change in total nonfarm payrolls (PAYEMS) from October 2024 through December 2024 above 150,000 jobs? | Yes | No | yes |
+| payems-weakest-12m-2018-07 | Was July 2018 the weakest of the 12 months ending in July 2018 for payroll growth, i.e. was the monthly change in total nonfarm payrolls (PAYEMS) in July 2018 lower than in each of the 11 months before it? | No | No | no |
+| payems-weakest-12m-2023-06 | Was June 2023 the weakest of the 12 months ending in June 2023 for payroll growth, i.e. was the monthly change in total nonfarm payrolls (PAYEMS) in June 2023 lower than in each of the 11 months before it? | Yes | No | yes |
+| pcepi-yoy-above-2.5-2021-08 | Is PCE inflation (year over year) above 2.5% for August 2021, i.e. is the 12-month percent change in the PCE price index (PCEPI) from August 2020 to August 2021 above 2.5%? | Yes | Yes | no |
+| pcepi-yoy-above-2.5-2021-09 | Is PCE inflation (year over year) above 2.5% for September 2021, i.e. is the 12-month percent change in the PCE price index (PCEPI) from September 2020 to September 2021 above 2.5%? | Yes | Yes | no |
+| pcepi-yoy-above-2.5-2024-01 | Is PCE inflation (year over year) above 2.5% for January 2024, i.e. is the 12-month percent change in the PCE price index (PCEPI) from January 2023 to January 2024 above 2.5%? | No | Yes | yes |
+| pcepi-yoy-above-2.5-2024-11 | Is PCE inflation (year over year) above 2.5% for November 2024, i.e. is the 12-month percent change in the PCE price index (PCEPI) from November 2023 to November 2024 above 2.5%? | No | Yes | yes |
+| unrate-mom-rise-2016-07 | Did the unemployment rate (UNRATE) rise in July 2016 versus the prior month, i.e. was it higher than in June 2016 (as published, to one decimal place)? | No | No | no |
+| unrate-mom-rise-2019-06 | Did the unemployment rate (UNRATE) rise in June 2019 versus the prior month, i.e. was it higher than in May 2019 (as published, to one decimal place)? | Yes | Yes | no |
