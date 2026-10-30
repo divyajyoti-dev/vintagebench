@@ -71,7 +71,9 @@ answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips,
   (agent = ModelSpec or sanity agent)
 - grader.py: dataclass Scores; grade(task, record, root) -> Scores;
   summarize(scores) -> DataFrame
-- sanity.py: oracle, always_yes, leaker, never_update (same call interface as a model)
+- sanity.py: oracle, always_yes, leaker, never_update (same call interface as a model:
+  agent(messages, tools, *, task, root) -> ModelResponse, driven through the same
+  tool-call loop; task/root are harness-side context, never shown to models)
 - run.py: CLI per §4
 
 ## 6. Subagent roles (each edits only owned files + own tests)
