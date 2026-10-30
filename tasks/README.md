@@ -22,13 +22,13 @@ hand. Gold answers are computed programmatically from two vintages (SPEC §3).
 Comparisons are strict; exact ties count as No. Candidates with any needed
 observation missing in either vintage are skipped. Materiality margin: a
 candidate is kept only if, in BOTH vintages, the deciding quantity is clear of
-its threshold by at least half the publication unit (column below), so no gold
-answer hinges on a difference below published precision. Counts are after
-this filter.
+its threshold by at least the margin in the column below (half the 0.1
+publication unit, or stricter for GDPC1), so no gold answer hinges on a
+difference below published precision. Counts are after this filter.
 
 | template | definition | materiality margin (both vintages) | candidates | flips |
 |---|---|---|---|---|
-| gdpc1-qoq-shrink (GDPC1) | yes iff level(q) < level(q-1 quarter); a tie is no. | |100 * (level(q) / level(q-1 quarter) - 1)| >= 0.05 | 40 | 0 |
+| gdpc1-qoq-shrink (GDPC1) | yes iff level(q) < level(q-1 quarter); a tie is no. | |QoQ % change, non-annualized| >= 0.05 (about 0.2pp annualized; stricter than half the 0.1 publication unit) | 40 | 0 |
 | indpro-mom-fall (INDPRO) | yes iff level(t) < level(t-1 month); a tie is no. | |100 * (level(t) / level(t-1 month) - 1)| >= 0.05 | 106 | 11 |
 | payems-avg3m-above-100k (PAYEMS) | PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > 100; a tie is no. | |3-month average - 100| >= 1 (thousand) | 120 | 9 |
 | payems-avg3m-above-150k (PAYEMS) | PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > 150; a tie is no. | |3-month average - 150| >= 1 (thousand) | 115 | 14 |

@@ -472,3 +472,21 @@ def test_build_candidates_drops_immaterial(monkeypatch: pytest.MonkeyPatch) -> N
         "Kept only if, in both vintages" in c.notes
         for c in tasks.build_candidates(["TOY"], TOY_ROOT)
     )
+
+
+@pytest.mark.parametrize("n", range(1, 13))
+def test_select_pilot_small_n_exact_size(n: int) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a well-stocked pool meets every quota
+        pilot = tasks.select_pilot(_pool(), n=n, seed=0)
+    assert len(pilot) == n
+    assert len({t.id for t in pilot}) == n
+    assert sum(t.series_id == "UNRATE" for t in pilot) == min(2, n - n // 2)
+    assert sum(t.flips for t in pilot) == n // 2
+
+
+def test_select_pilot_too_small_pool_warns() -> None:
+    pool = _pool()[:12]  # 2 target months only: cannot fill 20
+    with pytest.warns(UserWarning, match=r"got \d+/20 tasks"):
+        pilot = tasks.select_pilot(pool, n=20, seed=0)
+    assert len(pilot) < 20

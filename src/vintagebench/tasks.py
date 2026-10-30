@@ -30,10 +30,12 @@ Only target observations dated 2016-01-01 .. 2025-12-31 are used (SPEC §3).
 All comparisons are strict; exact ties (within ``EPS``) count as "no".
 
 Materiality margin: a candidate is kept only if, in BOTH vintages, the deciding
-quantity is clear of its threshold by at least half the publication unit, so no
-gold answer hinges on a difference below published precision:
+quantity is clear of its threshold by at least the margin below (half the 0.1
+publication unit, or stricter), so no gold answer hinges on a difference below
+published precision:
 
-- GDPC1: |quarter-over-quarter % change| >= 0.05
+- GDPC1: |quarter-over-quarter % change, non-annualized| >= 0.05 (about 0.2pp
+  annualized; stricter than half the 0.1 unit BEA uses for annualized growth)
 - INDPRO: |month-over-month % change| >= 0.05
 - PCEPI: |12-month % change - 2.5| >= 0.05 percentage points
 - PAYEMS 3-month average: |average - threshold| >= 1 (thousand jobs)
@@ -150,12 +152,15 @@ def pct_change(snapshot: pd.Series, t: pd.Timestamp, months: int = 1) -> float |
 # Materiality margins (pure): distance of the deciding quantity from its threshold
 # ---------------------------------------------------------------------------
 
-PCT_MARGIN = 0.05  # half of the 0.1 publication unit for % changes and rates
+# Half the 0.1 publication unit for INDPRO % changes and the PCE YoY rate. For GDPC1
+# the same 0.05 applies to the non-annualized QoQ % change, i.e. about 0.2pp
+# annualized: stricter than half of BEA's 0.1 unit for annualized growth.
+PCT_MARGIN = 0.05
 PAYROLL_MARGIN_K = 1.0  # PAYEMS is published in whole thousands
 
 
 def gdp_margin(snapshot: pd.Series, quarter: pd.Timestamp) -> float | None:
-    """GDPC1: |quarter-over-quarter % change| (threshold 0)."""
+    """GDPC1: |quarter-over-quarter % change, non-annualized| (threshold 0)."""
     p = pct_change(snapshot, quarter, months=3)
     return None if p is None else abs(p)
 
@@ -366,7 +371,10 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             definition="yes iff level(q) < level(q-1 quarter); a tie is no.",
             margin=gdp_margin,
             min_margin=PCT_MARGIN,
-            materiality="|100 * (level(q) / level(q-1 quarter) - 1)| >= 0.05",
+            materiality=(
+                "|QoQ % change, non-annualized| >= 0.05 (about 0.2pp annualized; stricter "
+                "than half the 0.1 publication unit)"
+            ),
         ),
     ),
     "PAYEMS": (
@@ -594,7 +602,9 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
     n_flip = n // 2
     n_ctrl = n - n_flip
     n_unr = min(N_CONTROL_SERIES, n_ctrl)
-    ctrl_yes = max(n_ctrl - n_ctrl // 2 - n_unr // 2, 0)
+    n_other = n_ctrl - n_unr  # >= 0
+    ctrl_yes = min(max(n_ctrl - n_ctrl // 2 - n_unr // 2, 0), n_other)
+    ctrl_no = max(n_other - ctrl_yes, 0)
     groups = [  # (name, [(stratum name, pool, quota), ...])
         (
             "flips",
@@ -618,7 +628,7 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
             "controls",
             [
                 ("control/as-of Yes", stratum(False, True, False), ctrl_yes),
-                ("control/as-of No", stratum(False, False, False), n_ctrl - n_unr - ctrl_yes),
+                ("control/as-of No", stratum(False, False, False), ctrl_no),
             ],
         ),
     ]
@@ -639,7 +649,7 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
     others = [t for t in pool if t.series_id != CONTROL_SERIES]
     picker.take(others, n - len(picker.chosen))
 
-    chosen = picker.chosen
+    chosen = picker.chosen[:n]  # quotas sum to n; the slice is only a guard
     short = [f"{name} {got[name]}/{quota}" for name, _, quota in strata if got[name] < quota]
     if short or len(chosen) < n:
         n_flips = sum(t.flips for t in chosen)
@@ -767,9 +777,9 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "Comparisons are strict; exact ties count as No. Candidates with any needed",
         "observation missing in either vintage are skipped. Materiality margin: a",
         "candidate is kept only if, in BOTH vintages, the deciding quantity is clear of",
-        "its threshold by at least half the publication unit (column below), so no gold",
-        "answer hinges on a difference below published precision. Counts are after",
-        "this filter.",
+        "its threshold by at least the margin in the column below (half the 0.1",
+        "publication unit, or stricter for GDPC1), so no gold answer hinges on a",
+        "difference below published precision. Counts are after this filter.",
         "",
         "| template | definition | materiality margin (both vintages) | candidates | flips |",
         "|---|---|---|---|---|",
