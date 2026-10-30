@@ -490,3 +490,106 @@ def test_select_pilot_too_small_pool_warns() -> None:
     with pytest.warns(UserWarning, match=r"got \d+/20 tasks"):
         pilot = tasks.select_pilot(pool, n=20, seed=0)
     assert len(pilot) < 20
+
+
+# --- GDPC1 growth above 2% (annualized) ---------------------------------------
+
+
+def _ann(rate_pct: float) -> pd.Series:
+    """Two quarters whose annualized growth is exactly ``rate_pct``."""
+    return quarterly([100.0, 100.0 * (1 + rate_pct / 100) ** 0.25])
+
+
+def test_annualized_qoq_pct() -> None:
+    assert tasks.annualized_qoq_pct(_ann(2.0), T("2020-04-01")) == pytest.approx(2.0)
+    s = quarterly([100.0, 101.0])
+    assert tasks.annualized_qoq_pct(s, T("2020-04-01")) == pytest.approx(100 * (1.01**4 - 1))
+    assert tasks.annualized_qoq_pct(s, T("2020-01-01")) is None
+
+
+@pytest.mark.parametrize(
+    ("rate", "expected"), [(2.5, True), (2.01, True), (1.99, False), (-1.0, False)]
+)
+def test_real_gdp_grew_faster_than(rate: float, expected: bool) -> None:
+    assert tasks.real_gdp_grew_faster_than(_ann(rate), T("2020-04-01")) is expected
+
+
+def test_real_gdp_grew_faster_than_tie_missing_and_flip() -> None:
+    q = T("2020-04-01")
+    tie = quarterly([100.0, 100.0])  # 0% vs threshold 0 -> tie -> no
+    assert tasks.real_gdp_grew_faster_than(tie, q, threshold_pct=0.0) is False
+    assert tasks.real_gdp_grew_faster_than(quarterly([100.0]), q) is None
+    # Sign flip: advance 1.2% annualized, revised 2.2%.
+    assert tasks.real_gdp_grew_faster_than(_ann(1.2), q) is False
+    assert tasks.real_gdp_grew_faster_than(_ann(2.2), q) is True
+
+
+@pytest.mark.parametrize(
+    ("rate", "kept"),
+    [(2.2, True), (1.8, True), (2.19, False), (1.81, False), (2.0, False), (3.0, True)],
+)
+def test_gdp_growth_margin_boundary(rate: float, kept: bool) -> None:
+    m = tasks.gdp_growth_margin(_ann(rate), T("2020-04-01"))
+    assert tasks.is_material(m, tasks.GDP_ANNUALIZED_MARGIN) is kept
+
+
+def test_gdp_growth_template_question() -> None:
+    tp = tasks.TEMPLATES["GDPC1"][1]
+    q = tp.question(T("2020-07-01"))
+    assert q.startswith("Did real GDP grow faster than 2% (annualized) in Q3 2020, i.e.")
+    assert "Q2 2020" in q and "above 2.0%" in q
+    assert tp.min_margin == 0.2 and tp.lookback_months == 3
+
+
+# --- COVID exclusion for controls ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("task_id", "overlaps"),
+    [
+        ("gdpc1-qoq-shrink-2020-01", False),
+        ("gdpc1-qoq-shrink-2020-04", True),  # 2020 Q2
+        ("gdpc1-growth-above-2-2020-07", True),  # 2020 Q3
+        ("gdpc1-qoq-shrink-2020-10", True),  # compares with Q3
+        ("gdpc1-qoq-shrink-2021-01", False),
+        ("indpro-mom-fall-2020-02", False),
+        ("indpro-mom-fall-2020-03", True),
+        ("indpro-mom-fall-2020-07", True),  # compares with June
+        ("indpro-mom-fall-2020-08", False),
+        ("unrate-mom-rise-2020-05", True),
+        ("payems-avg3m-above-100k-2020-09", True),  # reads June level
+        ("payems-avg3m-above-100k-2020-10", False),
+        ("payems-weakest-12m-2021-06", True),  # window reaches June 2020
+        ("payems-weakest-12m-2021-07", False),
+        ("pcepi-yoy-above-2.5-2021-06", True),
+        ("pcepi-yoy-above-2.5-2021-07", False),
+        ("pcepi-yoy-above-2.5-2020-02", False),
+    ],
+)
+def test_covid_window_overlap(task_id: str, overlaps: bool) -> None:
+    series = task_id.split("-")[0].upper()
+    key, ym = task_id[len(series) + 1 : -8], task_id[-7:]
+    task = _fake(series, key, ym, flips=False)
+    assert tasks.template_for(task) is not None
+    assert tasks.covid_window_overlap(task) is overlaps
+
+
+def test_select_pilot_excludes_covid_controls_keeps_covid_flips() -> None:
+    pool = []
+    months = [f"{y}-{m:02d}" for y in (2019, 2020, 2021) for m in range(1, 13)]
+    for i, ym in enumerate(months):
+        for s, key in [("INDPRO", "mom-fall"), ("PAYEMS", "avg3m-above-150k"),
+                       ("PCEPI", "yoy-above-2.5"), ("UNRATE", "mom-rise")]:  # fmt: skip
+            pool.append(_fake(s, key, ym, flips=False, yes=i % 2 == 0))
+    covid = ["2020-03", "2020-04", "2020-05", "2020-06", "2020-07"]
+    for j, ym in enumerate(covid):  # the only flips are inside COVID windows
+        pool.append(_fake("INDPRO", "mom-rise-x", ym, flips=True, yes=j % 2 == 0))
+        pool.append(_fake("PAYEMS", "weakest-x", ym, flips=True, yes=j % 2 == 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pilot = tasks.select_pilot(pool, n=20, seed=0)
+    controls = [t for t in pilot if not t.flips]
+    assert controls and not any(tasks.covid_window_overlap(t) for t in controls)
+    assert sum(t.flips for t in pilot) == 10  # COVID flips remain eligible
+    # Sanity: the pool did contain eligible-looking COVID controls.
+    assert any(not t.flips and tasks.covid_window_overlap(t) for t in pool)

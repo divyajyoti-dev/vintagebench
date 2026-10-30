@@ -34,13 +34,23 @@ quantity is clear of its threshold by at least the margin below (half the 0.1
 publication unit, or stricter), so no gold answer hinges on a difference below
 published precision:
 
-- GDPC1: |quarter-over-quarter % change, non-annualized| >= 0.05 (about 0.2pp
+- GDPC1 shrink: |quarter-over-quarter % change, non-annualized| >= 0.05 (about 0.2pp
   annualized; stricter than half the 0.1 unit BEA uses for annualized growth)
+- GDPC1 growth above 2%: |annualized QoQ growth - 2.0| >= 0.2 percentage points,
+  the annualized equivalent of the 0.05 non-annualized GDP margin (see
+  ``GDP_ANNUALIZED_MARGIN``)
 - INDPRO: |month-over-month % change| >= 0.05
 - PCEPI: |12-month % change - 2.5| >= 0.05 percentage points
 - PAYEMS 3-month average: |average - threshold| >= 1 (thousand jobs)
 - PAYEMS weakest-12m: |change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand)
 - UNRATE: none (values are compared after rounding to the published 0.1).
+
+COVID exclusion (controls only, applied in :func:`select_pilot`): a control is
+never selected if any observation its answer reads falls in the COVID collapse,
+i.e. a month from 2020-03 to 2020-06 for monthly series, or 2020 Q2 / Q3 for
+GDPC1. Such controls are trivially decided by the collapse. The window is the
+target period plus the template's ``lookback_months`` (e.g. 3 for the payroll
+3-month average, 12 for weakest-of-12 and PCE YoY). Flips there stay eligible.
 """
 
 from __future__ import annotations
@@ -165,6 +175,31 @@ def gdp_margin(snapshot: pd.Series, quarter: pd.Timestamp) -> float | None:
     return None if p is None else abs(p)
 
 
+# Annualized margin for the GDP growth template. The shrink margin is 0.05%
+# non-annualized; annualizing maps a non-annualized change g to 100*((1+g/100)^4-1),
+# whose slope is 4*(1+g/100)^3: about 4.0 near 0% and about 4.06 near 2% annualized
+# (g ~ 0.5%), so 0.05 maps to about 0.20pp. We use 0.2pp.
+GDP_ANNUALIZED_MARGIN = 0.2
+GDP_GROWTH_THRESHOLD = 2.0
+
+
+def annualized_qoq_pct(snapshot: pd.Series, quarter: pd.Timestamp) -> float | None:
+    """Unrounded annualized QoQ growth: 100 * ((L_q / L_{q-1 quarter})^4 - 1)."""
+    s = _normalize(snapshot)
+    now, before = _value(s, quarter), _value(s, _shift(quarter, -3))
+    if now is None or before is None or before <= 0:
+        return None
+    return 100.0 * ((now / before) ** 4 - 1.0)
+
+
+def gdp_growth_margin(
+    snapshot: pd.Series, quarter: pd.Timestamp, threshold_pct: float = GDP_GROWTH_THRESHOLD
+) -> float | None:
+    """GDPC1: |annualized QoQ growth - threshold| in percentage points."""
+    a = annualized_qoq_pct(snapshot, quarter)
+    return None if a is None else abs(a - threshold_pct)
+
+
 def mom_pct_margin(snapshot: pd.Series, month: pd.Timestamp) -> float | None:
     """INDPRO: |month-over-month % change| (threshold 0)."""
     p = pct_change(snapshot, month)
@@ -214,6 +249,17 @@ def real_gdp_shrank(snapshot: pd.Series, quarter: pd.Timestamp) -> bool | None:
     """
     d = change(snapshot, quarter, months=3)
     return None if d is None else d < -EPS
+
+
+def real_gdp_grew_faster_than(
+    snapshot: pd.Series, quarter: pd.Timestamp, threshold_pct: float = GDP_GROWTH_THRESHOLD
+) -> bool | None:
+    """GDPC1: yes iff annualized QoQ growth 100*((L_q/L_{q-1})^4 - 1) > threshold.
+
+    Unrounded; a tie (within EPS) -> no.
+    """
+    a = annualized_qoq_pct(snapshot, quarter)
+    return None if a is None else a > threshold_pct + EPS
 
 
 def payrolls_weakest_in_12m(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
@@ -312,6 +358,7 @@ class Template:
     margin: Callable[[pd.Series, pd.Timestamp], float | None] | None = None
     min_margin: float = 0.0
     materiality: str = "none"
+    lookback_months: int = 1  # how far before the target the answer reads data
 
 
 def fell_vs_prior_month_template(label: str, key: str = "mom-fall") -> Template:
@@ -353,6 +400,7 @@ def _payrolls_3m_template(threshold_k: int) -> Template:
         margin=lambda s, t: payrolls_3m_margin(s, t, threshold_k),
         min_margin=PAYROLL_MARGIN_K,
         materiality=f"|3-month average - {threshold_k}| >= 1 (thousand)",
+        lookback_months=3,
     )
 
 
@@ -375,6 +423,31 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
                 "|QoQ % change, non-annualized| >= 0.05 (about 0.2pp annualized; stricter "
                 "than half the 0.1 publication unit)"
             ),
+            lookback_months=3,
+        ),
+        Template(
+            key="growth-above-2",
+            months_per_period=3,
+            question=lambda t: (
+                f"Did real GDP grow faster than 2% (annualized) in {_quarter(t)}, i.e. was "
+                f"the annualized growth rate of real GDP (GDPC1) from {_quarter(_shift(t, -3))} "
+                f"to {_quarter(t)}, 100 * ((level({_quarter(t)}) / "
+                f"level({_quarter(_shift(t, -3))}))^4 - 1), above 2.0%?"
+            ),
+            gold=real_gdp_grew_faster_than,
+            metric=annualized_qoq_pct,
+            metric_name="annualized QoQ growth (%)",
+            definition=(
+                "yes iff 100 * ((level(q) / level(q-1 quarter))^4 - 1) > 2.0, unrounded; "
+                "a tie is no."
+            ),
+            margin=gdp_growth_margin,
+            min_margin=GDP_ANNUALIZED_MARGIN,
+            materiality=(
+                "|annualized QoQ growth - 2.0| >= 0.2 (percentage points; the annualized "
+                "equivalent of the 0.05 non-annualized GDP margin)"
+            ),
+            lookback_months=3,
         ),
     ),
     "PAYEMS": (
@@ -396,6 +469,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             margin=payrolls_weakest_margin,
             min_margin=PAYROLL_MARGIN_K,
             materiality="|change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand)",
+            lookback_months=12,
         ),
         _payrolls_3m_template(100),
         _payrolls_3m_template(150),
@@ -417,6 +491,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             margin=lambda s, t: pce_margin(s, t, 2.5),
             min_margin=PCT_MARGIN,
             materiality="|12-month % change - 2.5| >= 0.05 (percentage points)",
+            lookback_months=12,
         ),
     ),
     "UNRATE": (
@@ -565,6 +640,37 @@ def _template_key(task: Task) -> str:
     return task.id[: -len(_period_key(task)) - 1] if task.id.endswith(_period_key(task)) else ""
 
 
+# COVID collapse periods (observation dates) that make a control trivially decided.
+COVID_MONTHS = (date(2020, 3, 1), date(2020, 6, 1))  # monthly series, inclusive
+COVID_QUARTERS = frozenset({date(2020, 4, 1), date(2020, 7, 1)})  # 2020 Q2, Q3
+
+
+def template_for(task: Task) -> Template | None:
+    """The template that generated ``task`` (from its id), or None if unknown."""
+    key = _template_key(task)
+    for tp in TEMPLATES.get(task.series_id, ()):
+        if f"{task.series_id.lower()}-{tp.key}" == key:
+            return tp
+    return None
+
+
+def covid_window_overlap(task: Task) -> bool:
+    """True iff any observation the task's answer reads is in the COVID collapse.
+
+    The window is the target period and every period up to ``lookback_months``
+    before it (step = the template's period length). Monthly: any month 2020-03 ..
+    2020-06; quarterly: 2020 Q2 or Q3. Unknown templates use the target alone.
+    """
+    tp = template_for(task)
+    lookback = tp.lookback_months if tp else 0
+    step = tp.months_per_period if tp else 1
+    t = pd.Timestamp(_period_key(task) + "-01")
+    window = [_shift(t, -k).date() for k in range(0, lookback + 1, step)]
+    if step == 3:
+        return any(d in COVID_QUARTERS for d in window)
+    return any(COVID_MONTHS[0] <= d <= COVID_MONTHS[1] for d in window)
+
+
 def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Task]:
     """Select a seeded, balanced pilot set (~half flips, spread across series/years).
 
@@ -575,6 +681,9 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
     - flips (non-UNRATE): ``n // 2``, split Yes/No as evenly as possible;
     - UNRATE controls: exactly 2 (one Yes, one No when available);
     - other controls: the rest, split so controls overall are ~half Yes.
+
+    Controls whose window overlaps the COVID collapse (:func:`covid_window_overlap`)
+    are never selected; flips there stay eligible.
 
     Strata are filled round-robin, one task at a time; each pick is greedy: the
     candidate whose series is least used among already chosen tasks with the same
@@ -594,6 +703,7 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
             t
             for t in pool
             if t.flips == flips
+            and (flips or not covid_window_overlap(t))
             and bool(t.gold_as_of) == yes
             and (t.series_id == CONTROL_SERIES) == unrate
             and not (flips and unrate)
@@ -646,7 +756,11 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
     for _, sts in groups:  # sibling fallback, keeps the group's size
         deficit = sum(q for _, _, q in sts) - sum(got[name] for name, _, _ in sts)
         picker.take([t for _, sp, _ in sts for t in sp], deficit)
-    others = [t for t in pool if t.series_id != CONTROL_SERIES]
+    others = [
+        t
+        for t in pool
+        if t.series_id != CONTROL_SERIES and (t.flips or not covid_window_overlap(t))
+    ]
     picker.take(others, n - len(picker.chosen))
 
     chosen = picker.chosen[:n]  # quotas sum to n; the slice is only a guard
@@ -748,6 +862,7 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         c[0] += 1
         c[1] += t.flips
     tpl = {f"{s.lower()}-{tp.key}": tp for s, tps in TEMPLATES.items() for tp in tps}
+    n_covid = sum(not t.flips and covid_window_overlap(t) for t in candidates)
     n_flips = sum(t.flips for t in pilot)
     n_unrate = sum(t.series_id == CONTROL_SERIES for t in pilot)
     lines = [
@@ -771,6 +886,16 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "  latest vintage after it.",
         "- flips: gold_as_of != gold_revised. Each answer uses one vintage only; levels",
         "  are never compared across vintages (base-year rebasings do not matter).",
+        "",
+        "## COVID exclusion (controls only)",
+        "",
+        "No control is selected if any observation its answer reads falls in the COVID",
+        "collapse: a month from 2020-03 to 2020-06 (monthly series) or 2020 Q2 / Q3",
+        "(GDPC1). The window is the target plus the template's lookback (1 month for",
+        "month-over-month questions, 1 quarter for GDP, 3 months for the payroll",
+        "3-month average, 12 months for weakest-of-12 and PCE YoY). Such controls are",
+        "trivially decided by the collapse. Flips in these windows stay eligible.",
+        f"Candidate controls excluded by this rule: {n_covid}.",
         "",
         "## Templates",
         "",
