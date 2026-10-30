@@ -66,8 +66,33 @@ def _new_run_dir(out_dir: Path) -> Path:
     return run_dir
 
 
+def _share(flags: list[bool]) -> str:
+    return f"{sum(flags)}/{len(flags)} ({sum(flags) / len(flags):.0%})"
+
+
+def yes_share_line(tasks: list[Task]) -> str:
+    """Share of yes/no tasks whose gold is Yes, as of and revised, plus the
+    majority-class baseline (always giving the more common as-of / revised answer)."""
+    yn = [t for t in tasks if t.answer_type == "yes_no"]
+    if not yn:
+        return "- yes share: no yes/no tasks"
+    asof = [bool(t.gold_as_of) for t in yn]
+    rev = [bool(t.gold_revised) for t in yn]
+    base_asof = asof if sum(asof) * 2 >= len(asof) else [not x for x in asof]
+    base_rev = rev if sum(rev) * 2 >= len(rev) else [not x for x in rev]
+    return (
+        f"- yes share ({len(yn)} yes/no tasks): gold_as_of = Yes {_share(asof)}, "
+        f"gold_revised = Yes {_share(rev)}; majority-class baseline: "
+        f"asof_correct {_share(base_asof)}, revised_correct {_share(base_rev)}"
+    )
+
+
 def _write_summary(
-    path: Path, scores: list[grader.Scores], args: argparse.Namespace, note: str
+    path: Path,
+    scores: list[grader.Scores],
+    tasks: list[Task],
+    args: argparse.Namespace,
+    note: str,
 ) -> None:
     lines = [
         "# VintageBench run summary",
@@ -75,6 +100,7 @@ def _write_summary(
         f"- tasks: {args.tasks}",
         f"- mode: {'sanity agents' if args.sanity else 'models'}",
         f"- status: {note}",
+        yes_share_line(tasks),
         "",
         grader.summary_markdown(scores),
         "",
@@ -111,7 +137,7 @@ def run(
         except models.BudgetExceeded as exc:
             note, code = f"STOPPED at budget cap: {exc}", EXIT_BUDGET
     note += f"; spent this run ${budget.spent_usd:.4f} of ${budget.limit_usd:.2f}"
-    _write_summary(run_dir / "summary.md", scores, args, note)
+    _write_summary(run_dir / "summary.md", scores, tasks, args, note)
     return run_dir, code
 
 

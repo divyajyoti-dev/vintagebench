@@ -14,14 +14,22 @@ Expected behaviour:
 - oracle: turn 1 gold_as_of with as-of values; turn 2 gold_revised, changed=flips.
   100% on everything, 0 leakage, Brier 0.
 - always_yes: "yes" (confidence 0.5) both turns, never calls tools, changed=false.
-  ~50% on yes/no tasks, wrong on number tasks; update_correct on controls only.
+  Scores the share of yes golds on yes/no tasks (~50% on a balanced set; the run
+  summary prints that share), wrong on number tasks; update_correct on controls only.
 - leaker: reads the latest vintage regardless of date; answers gold_revised (a proxy
   for "the answer on revised data") with confidence 1 on both turns, changed=false.
-  Leakage flagged wherever a reported value differs from the as-of vintage.
+  Leakage flagged wherever a reported value differs from the as-of vintage, and not
+  flagged when the latest vintage equals the as-of vintage over its window.
 - never_update: like oracle on turn 1, then repeats its turn-1 answer with
   changed=false. update_correct and revised_correct only on controls.
 
 values_used covers every observation in the window [as_of - 2 years, as_of].
+The window ends on as_of_date by design: the leaker reads it from the latest vintage,
+so on real data it also reports the most recent observation(s) that had not yet been
+published on as_of (e.g. the as_of month itself). Such values count as leakage, as they
+should: an analyst who cites them is using data from the future. This is why the
+leaker is flagged on every real-data episode; the oracle and never_update read the
+window through the tool, which only serves published data.
 """
 
 from __future__ import annotations
@@ -132,7 +140,7 @@ class Oracle(_Base):
 
 
 class AlwaysYes(_Base):
-    """Always answer yes; expected ~50% accuracy on yes/no tasks."""
+    """Always answer yes; scores the share of yes golds (~50% on a balanced set)."""
 
     name = "always_yes"
 
