@@ -1,3 +1,5 @@
-budget_usd: 10
-trials: 3
+# Run settings for `python -m vintagebench.run` (SPEC §4, §7).
+budget_usd: 10        # hard cap; the run stops before a call that could exceed it
+trials: 3             # default when --trials is not given
 temperature: 0
+max_tokens: 2048      # max output tokens per model call (also used for the budget estimate)
