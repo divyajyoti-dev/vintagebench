@@ -1,6 +1,7 @@
 """models.complete with a fake OpenAI client: both tool paths, cache, retries, cost, budget."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,3 +236,112 @@ def test_iter_json_objects():
     assert models.iter_json_objects('x {"a": 1} y {"b": {"c": 2}}') == [{"a": 1}, {"b": {"c": 2}}]
     assert models.iter_json_objects('```json\n{"a": 1}\n```') == [{"a": 1}]
     assert models.iter_json_objects("no json {here") == []
+
+
+# --- reasoning_effort and effective settings -----------------------------------------
+
+
+def _spec(effort):
+    return ModelSpec("openai", "gpt-r", 1.0, 1.0, native_tools=True, reasoning_effort=effort)
+
+
+@pytest.mark.parametrize(
+    "effort,temp_sent",
+    [(None, True), ("none", True), ("low", False), ("medium", False)],
+)
+def test_reasoning_effort_and_temperature(tmp_path, effort, temp_sent):
+    client = FakeClient(completion(text="hi"))
+    models.complete(_spec(effort), MESSAGES, TOOLS, client=client, cache_dir=tmp_path)
+    req = client.requests[0]
+    assert ("temperature" in req) is temp_sent
+    if temp_sent:
+        assert req["temperature"] == 0
+    assert req.get("reasoning_effort") == effort
+    assert ("reasoning_effort" in req) is (effort is not None)
+    payload = json.loads(next(Path(tmp_path).rglob("*.json")).read_text())
+    assert payload["settings"] == {
+        "temperature": 0.0 if temp_sent else None,
+        "temperature_sent": temp_sent,
+        "reasoning_effort": effort,
+    }
+    assert payload["request"] == req
+
+
+def test_reasoning_effort_changes_cache_key(tmp_path):
+    models.complete(_spec("none"), MESSAGES, TOOLS, client=FakeClient(completion(text="a")),
+                    cache_dir=tmp_path)  # fmt: skip
+    other = FakeClient(completion(text="b"))
+    r = models.complete(_spec("low"), MESSAGES, TOOLS, client=other, cache_dir=tmp_path)
+    assert r.text == "b" and len(other.requests) == 1
+
+
+# --- strict models.yaml loading ------------------------------------------------------
+
+ROW = "provider: openai, model_id: m, price_in: 1, price_out: 2, native_tools: true"
+
+
+def test_load_model_specs_reasoning_effort(tmp_path):
+    p = tmp_path / "models.yaml"
+    p.write_text(f"- {{{ROW}, reasoning_effort: none}}\n- {{{ROW}}}\n")
+    a, b = models.load_model_specs(p)
+    assert a.reasoning_effort == "none" and b.reasoning_effort is None
+
+
+@pytest.mark.parametrize(
+    "row,match",
+    [
+        (f"{{{ROW}, temperature: 0}}", "unknown keys \\['temperature'\\]"),
+        (f"{{{ROW}, reasoning: none}}", "unknown keys"),
+        ("{provider: openai, model_id: m, price_in: 1, price_out: 2}", "missing \\['native_tools'"),
+        (f"{{{ROW.replace('true', 'yes please')}}}", "native_tools must be"),
+        (f"{{{ROW}, reasoning_effort: 3}}", "reasoning_effort must be a string"),
+        ("just a string", "expected a mapping"),
+    ],
+)
+def test_load_model_specs_rejects_bad_entries(tmp_path, row, match):
+    p = tmp_path / "models.yaml"
+    p.write_text(f"- {row}\n")
+    with pytest.raises(ValueError, match=match):
+        models.load_model_specs(p)
+
+
+def test_load_model_specs_rejects_non_list(tmp_path):
+    p = tmp_path / "models.yaml"
+    p.write_text("provider: openai\n")
+    with pytest.raises(ValueError, match="expected a YAML list"):
+        models.load_model_specs(p)
+
+
+def test_repo_models_yaml_is_the_pilot_config():
+    specs = models.load_model_specs(Path(__file__).parents[1] / "config" / "models.yaml")
+    assert specs == [
+        ModelSpec("openai", "gpt-6-sol", 2.0, 10.0, True, "none"),
+        ModelSpec("openai", "gpt-6-luna", 0.1, 0.5, True, "none"),
+    ]
+
+
+# --- measured usage from the cache ---------------------------------------------------
+
+
+def _cache(tmp_path, task, turn, trial, step, tin, tout, text="x"):
+    models.complete(
+        NATIVE, MESSAGES + [{"role": "user", "content": text}], TOOLS,
+        client=FakeClient(completion(text="r", tin=tin, tout=tout)), cache_dir=tmp_path,
+        task_id=task, turn=turn, trial=trial, step=step,
+    )  # fmt: skip
+
+
+def test_cached_episode_usage(tmp_path):
+    _cache(tmp_path, "t1", 1, 1, 0, 100, 10)
+    _cache(tmp_path, "t1", 1, 1, 1, 200, 20)
+    _cache(tmp_path, "t1", 2, 1, 0, 300, 30)
+    _cache(tmp_path, "t2", 1, 1, 0, 999, 99)  # never reached turn 2: excluded
+    _cache(tmp_path, "t3", 1, 2, 0, 50, 5, text="old")
+    _cache(tmp_path, "t3", 1, 2, 0, 70, 7, text="new")  # same slot, newer request wins
+    _cache(tmp_path, "t3", 2, 2, 0, 30, 3)
+    old = next(p for p in Path(tmp_path).rglob("t3/turn1_*.json") if '"old"' in p.read_text())
+    os.utime(old, (1, 1))
+    usage = models.cached_episode_usage(NATIVE, tmp_path)
+    assert usage == [(600, 60), (100, 10)]
+    assert models.cached_episode_usage(TEXT, tmp_path) == []
+    assert models.cached_episode_usage(NATIVE, tmp_path / "missing") == []

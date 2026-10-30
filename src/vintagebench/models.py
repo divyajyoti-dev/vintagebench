@@ -55,10 +55,26 @@ class ModelSpec:
     price_in: float
     price_out: float
     native_tools: bool
+    reasoning_effort: str | None = None
 
     @property
     def name(self) -> str:
         return f"{self.provider}/{self.model_id}"
+
+
+def effective_settings(spec: ModelSpec, temperature: float) -> dict[str, Any]:
+    """Sampling settings actually sent for ``spec``.
+
+    ``reasoning_effort`` is sent only when set in the spec. OpenAI reasoning models
+    reject ``temperature`` unless reasoning is off, so temperature is sent only when
+    reasoning_effort is unset or "none".
+    """
+    send_temp = spec.reasoning_effort in (None, "none")
+    return {
+        "temperature": temperature if send_temp else None,
+        "temperature_sent": send_temp,
+        "reasoning_effort": spec.reasoning_effort,
+    }
 
 
 @dataclass
@@ -112,20 +128,42 @@ def estimate_cost(
     return cost_usd(spec, chars // 3 + 1, max_tokens)
 
 
+SPEC_REQUIRED = ("provider", "model_id", "price_in", "price_out", "native_tools")
+SPEC_OPTIONAL = ("reasoning_effort",)
+
+
 def load_model_specs(path: Path) -> list[ModelSpec]:
-    """Read config/models.yaml (a YAML list of ModelSpec fields)."""
+    """Read config/models.yaml (a YAML list of ModelSpec fields).
+
+    Unknown or missing keys, unknown providers and malformed values raise ValueError.
+    """
     rows = yaml.safe_load(Path(path).read_text()) or []
+    if not isinstance(rows, list):
+        raise ValueError(f"{path}: expected a YAML list of models")
     specs = []
-    for row in rows:
+    for i, row in enumerate(rows):
+        where = f"{path}: entry {i}"
+        if not isinstance(row, dict):
+            raise ValueError(f"{where}: expected a mapping")
+        unknown = set(row) - set(SPEC_REQUIRED) - set(SPEC_OPTIONAL)
+        missing = set(SPEC_REQUIRED) - set(row)
+        if unknown or missing:
+            raise ValueError(f"{where}: unknown keys {sorted(unknown)}, missing {sorted(missing)}")
         if row["provider"] not in BASE_URLS:
-            raise ValueError(f"unknown provider {row['provider']!r}")
+            raise ValueError(f"{where}: unknown provider {row['provider']!r}")
+        if not isinstance(row["native_tools"], bool):
+            raise ValueError(f"{where}: native_tools must be true or false")
+        effort = row.get("reasoning_effort")
+        if effort is not None and not isinstance(effort, str):
+            raise ValueError(f"{where}: reasoning_effort must be a string")
         specs.append(
             ModelSpec(
                 provider=row["provider"],
                 model_id=str(row["model_id"]),
                 price_in=float(row["price_in"]),
                 price_out=float(row["price_out"]),
-                native_tools=bool(row["native_tools"]),
+                native_tools=row["native_tools"],
+                reasoning_effort=effort,
             )
         )
     return specs
@@ -242,9 +280,44 @@ def _cache_path(
     cache_dir: Path, spec: ModelSpec, task_id: str, turn: int, trial: int, step: int, request: dict
 ) -> Path:
     digest = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:12]
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", spec.model_id)
     name = f"turn{turn}_trial{trial}_step{step}_{digest}.json"
-    return Path(cache_dir) / spec.provider / safe / task_id / name
+    return Path(cache_dir) / spec.provider / _safe_model(spec) / task_id / name
+
+
+def _safe_model(spec: ModelSpec) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", spec.model_id)
+
+
+_CACHE_NAME = re.compile(r"turn(\d+)_trial(\d+)_step(\d+)_[0-9a-f]+\.json")
+
+
+def cached_episode_usage(spec: ModelSpec, cache_dir: Path) -> list[tuple[int, int]]:
+    """Measured (input_tokens, output_tokens) per cached episode of ``spec``.
+
+    Reads only the local cache, never the network. If a (task, turn, trial, step)
+    slot has several cached requests (e.g. after a prompt change), the newest file is
+    used. Only episodes that reached turn 2 count.
+    """
+    newest: dict[tuple[str, int, int, int], tuple[float, int, int]] = {}
+    for f in (Path(cache_dir) / spec.provider / _safe_model(spec)).glob("*/*.json"):
+        m = _CACHE_NAME.fullmatch(f.name)
+        if not m:
+            continue
+        turn, trial, step = (int(g) for g in m.groups())
+        key = (f.parent.name, turn, trial, step)
+        mtime = f.stat().st_mtime
+        if key in newest and newest[key][0] >= mtime:
+            continue
+        resp = json.loads(f.read_text())["response"]
+        newest[key] = (mtime, int(resp["input_tokens"]), int(resp["output_tokens"]))
+    episodes: dict[tuple[str, int], list[int]] = {}
+    turns: dict[tuple[str, int], set[int]] = {}
+    for (task, turn, trial, _), (_, tin, tout) in newest.items():
+        tot = episodes.setdefault((task, trial), [0, 0])
+        tot[0] += tin
+        tot[1] += tout
+        turns.setdefault((task, trial), set()).add(turn)
+    return [(t[0], t[1]) for k, t in sorted(episodes.items()) if 2 in turns[k]]
 
 
 def _call_with_retries(
@@ -304,6 +377,9 @@ def complete(
 ) -> ModelResponse:
     """Call the model at temperature 0 with retries, caching and cost tracking.
 
+    ``spec.reasoning_effort``, when set, is sent; temperature is then sent only if it
+    is "none" (see :func:`effective_settings`, recorded in each cache file).
+
     Uses native tool calling when ``spec.native_tools`` is true, otherwise the
     plain-text JSON tool protocol. A cache hit makes no client call and is not
     charged to ``budget``. ``client`` defaults to :func:`make_client` (created only
@@ -316,7 +392,11 @@ def complete(
             request["tools"] = tools
     else:
         request = {"model": spec.model_id, "messages": to_text_protocol(messages, tools)}
-    request["temperature"] = temperature
+    settings = effective_settings(spec, temperature)
+    if settings["temperature_sent"]:
+        request["temperature"] = temperature
+    if spec.reasoning_effort is not None:
+        request["reasoning_effort"] = spec.reasoning_effort
     tok_key = "max_completion_tokens" if spec.provider == "openai" else "max_tokens"
     request[tok_key] = max_tokens
 
@@ -339,6 +419,11 @@ def complete(
         budget.charge(response.cost_usd)
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"provider": spec.provider, "request": request, "response": asdict(response)}
+        payload = {
+            "provider": spec.provider,
+            "settings": settings,
+            "request": request,
+            "response": asdict(response),
+        }
         path.write_text(json.dumps(payload, indent=1, default=str))
     return response
