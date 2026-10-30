@@ -2,10 +2,11 @@
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from vintagebench import episode, grader, models, sanity
-from vintagebench.tasks import load_tasks
+from vintagebench.tasks import Task, load_tasks
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ROOT = FIXTURES / "vintages"
@@ -71,3 +72,59 @@ def test_leaker_reports_latest_vintage():
     rec = episode.run_episode(TASKS[0], sanity.leaker, trial=1, root=ROOT)
     used = rec.turn1["values_used"]
     assert (used["2020-06-01"], used["2020-11-01"], used["2020-12-01"]) == (100.8, 102.7, 103.1)
+
+
+# --- leaker: episode-level checks on a tmp fixture -----------------------------------
+
+MONTHS = [f"2020-{m:02d}-01" for m in range(1, 13)]
+FIRST = [100.0 + i / 10 for i in range(12)]
+
+
+def _write_series(root, revisions):
+    """LEAK series: first vintage 2021-01-15 with all 2020 months, plus later rows."""
+
+    def d(s):
+        return pd.Timestamp(s).date()
+
+    rows = [("LEAK", d(m), d("2021-01-15"), v) for m, v in zip(MONTHS, FIRST, strict=True)]
+    rows += [("LEAK", d(obs), d(vint), v) for vint, obs, v in revisions]
+    cols = ["series_id", "observation_date", "vintage_date", "value"]
+    pd.DataFrame(rows, columns=cols).to_parquet(root / "LEAK.parquet", index=False)
+
+
+def _leak_task():
+    return Task(
+        id="leak-1", series_id="LEAK", as_of_date="2021-01-15",
+        question="Did LEAK fall in June 2020 versus the prior month?", answer_type="yes_no",
+        gold_as_of=False, revision_date="2021-02-15", gold_revised=False, flips=False,
+    )  # fmt: skip
+
+
+def _leaker_leakage(root):
+    task = _leak_task()
+    rec = episode.run_episode(task, sanity.leaker, trial=1, root=root)
+    return grader.grade(task, rec, root).leakage, rec.turn1["values_used"]
+
+
+def test_leaker_not_flagged_when_latest_equals_as_of(tmp_path):
+    _write_series(tmp_path, [])  # single vintage: latest == as-of
+    leakage, used = _leaker_leakage(tmp_path)
+    assert len(used) == 12 and leakage is False
+
+
+def test_leaker_not_flagged_when_later_vintage_repeats_as_of_values(tmp_path):
+    _write_series(tmp_path, [("2021-02-15", "2020-06-01", FIRST[5])])  # unchanged value
+    assert _leaker_leakage(tmp_path)[0] is False
+
+
+def test_leaker_flagged_when_latest_differs(tmp_path):
+    _write_series(tmp_path, [("2021-02-15", "2020-06-01", 99.9)])
+    leakage, used = _leaker_leakage(tmp_path)
+    assert used["2020-06-01"] == 99.9 and leakage is True
+
+
+def test_leaker_flagged_for_observation_unpublished_at_as_of(tmp_path):
+    # the window ends on as_of_date; 2021-01-01 was first published after as_of
+    _write_series(tmp_path, [("2021-02-05", "2021-01-01", 101.5)])
+    leakage, used = _leaker_leakage(tmp_path)
+    assert "2021-01-01" in used and leakage is True
