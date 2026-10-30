@@ -53,12 +53,15 @@ controls are trivially decided by the collapse. The window is the
 target period plus the template's ``lookback_months`` (e.g. 3 for the payroll
 3-month average, 12 for weakest-of-12 and PCE YoY). Flips there stay eligible.
 
-Non-trivial controls (applied in :func:`select_pilot`): for each candidate the
-notes record its distance from the threshold in units of the template's
-materiality margin, in both vintages. A non-UNRATE control is never selected if
+Non-trivial controls (applied in :func:`select_pilot`): each candidate's distance
+from the threshold, in units of the template's materiality margin, is computed
+numerically in both vintages (unrounded; kept as an internal attribute, not
+serialized, and recomputed from the vintage data after :func:`load_tasks`; the
+notes only display it). A non-UNRATE control is never selected if
 that distance exceeds the template's ``control_cap`` in BOTH vintages (it is
 obvious from the era alone). Caps: 10 margins for INDPRO (0.5% MoM), PCEPI
-(0.5pp), GDPC1 shrink (0.5% QoQ) and GDPC1 growth (2pp annualized); 40 margins
+(0.5pp) and GDPC1 growth (2pp annualized); 5 margins for GDPC1 shrink (0.25% QoQ,
+about 1pp annualized); 40 margins
 (40k jobs) for both PAYEMS templates. UNRATE controls and all flips are exempt.
 """
 
@@ -66,8 +69,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import random
-import re
 import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -447,7 +450,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
                 "than half the 0.1 publication unit)"
             ),
             lookback_months=3,
-            control_cap=10.0,
+            control_cap=5.0,
         ),
         Template(
             key="growth-above-2",
@@ -646,10 +649,10 @@ def _make_task(
             f" {template.metric2_name}: as-of {_fmt(template.metric2(s_as_of, t))}, "
             f"revised {_fmt(template.metric2(s_rev, t))}."
         )
-    if template.margin is not None and template.min_margin > 0:
-        d = [template.margin(s, t) / template.min_margin for s in (s_as_of, s_rev)]  # type: ignore[operator]
-        notes += f" {DISTANCE_LABEL}: as-of {d[0]:.4f}, revised {d[1]:.4f}."
-    return Task(
+    dist = _distances(template, s_as_of, s_rev, t)
+    if dist is not None:
+        notes += f" {DISTANCE_LABEL}: as-of {dist[0]:.4f}, revised {dist[1]:.4f}."
+    task = Task(
         id=_task_id(series_id, template, t),
         series_id=series_id,
         as_of_date=as_of.isoformat(),
@@ -661,6 +664,29 @@ def _make_task(
         flips=bool(gold_as_of) != bool(gold_rev),
         notes=notes,
     )
+    if dist is not None:
+        _attach_distances(task, dist)
+    return task
+
+
+DISTANCE_LABEL = "Distance from threshold in margin units"
+_DIST_ATTR = "_threshold_distances"  # internal, not a dataclass field: never serialized
+
+
+def _distances(
+    template: Template, s_as_of: pd.Series, s_rev: pd.Series, t: pd.Timestamp
+) -> tuple[float, float] | None:
+    """Unrounded (as-of, revised) |quantity - threshold| / margin; None if no margin."""
+    if template.margin is None or template.min_margin <= 0:
+        return None
+    a, r = template.margin(s_as_of, t), template.margin(s_rev, t)
+    if a is None or r is None:
+        return None
+    return a / template.min_margin, r / template.min_margin
+
+
+def _attach_distances(task: Task, dist: tuple[float, float]) -> None:
+    object.__setattr__(task, _DIST_ATTR, dist)  # frozen dataclass: internal cache only
 
 
 # ---------------------------------------------------------------------------
@@ -714,30 +740,50 @@ def covid_window_overlap(task: Task) -> bool:
     return any(COVID_MONTHS[0] <= d <= COVID_MONTHS[1] for d in window)
 
 
-DISTANCE_LABEL = "Distance from threshold in margin units"
-_DISTANCE_RE = re.compile(re.escape(DISTANCE_LABEL) + r": as-of ([0-9.]+), revised ([0-9.]+)\.")
+def threshold_distances(task: Task, root: Path | None = None) -> tuple[float, float]:
+    """Unrounded (as-of, revised) distance from the threshold in margin units.
+
+    Uses the value computed by :func:`build_candidates` when present; otherwise
+    (e.g. after :func:`load_tasks`) recomputes it from the vintage data under
+    ``root`` (default ``data.DATA_DIR``) and caches it on the task. Raises
+    ``ValueError`` if the template has no margin or the data cannot provide it.
+    """
+    cached = getattr(task, _DIST_ATTR, None)
+    if cached is not None:
+        return cached
+    tp = template_for(task)
+    if tp is None or tp.margin is None:
+        raise ValueError(f"{task.id}: no template margin to compute a distance")
+    t = pd.Timestamp(_period_key(task) + "-01")
+    src = data.DATA_DIR if root is None else root
+    try:
+        snaps = [
+            data.get_as_of(task.series_id, date.fromisoformat(d), src)
+            for d in (task.as_of_date, task.revision_date)
+        ]
+    except (OSError, ValueError, KeyError) as exc:
+        raise ValueError(f"{task.id}: cannot load vintages to compute distance") from exc
+    dist = _distances(tp, snaps[0], snaps[1], t)
+    if dist is None or not all(math.isfinite(x) for x in dist):
+        raise ValueError(f"{task.id}: distance from threshold is missing in the data")
+    _attach_distances(task, dist)
+    return dist
 
 
-def threshold_distances(task: Task) -> tuple[float, float] | None:
-    """(as-of, revised) distance from the threshold in margin units, from ``notes``."""
-    m = _DISTANCE_RE.search(task.notes)
-    return None if m is None else (float(m.group(1)), float(m.group(2)))
-
-
-def trivial_control(task: Task) -> bool:
+def trivial_control(task: Task, root: Path | None = None) -> bool:
     """True iff ``task`` is a non-UNRATE control that is far from the line in BOTH
-    vintages: distance > the template's ``control_cap`` (margin units) in each.
+    vintages: unrounded distance > the template's ``control_cap`` (margin units).
 
-    Flips, UNRATE controls, and tasks without a cap or recorded distance are never
-    trivial.
+    Flips, UNRATE controls and templates without a cap are never trivial. For a
+    capped template the distance is required: if it is neither attached nor
+    computable from the data, :func:`threshold_distances` raises ``ValueError``.
     """
     if task.flips or task.series_id == CONTROL_SERIES:
         return False
     tp = template_for(task)
-    dist = threshold_distances(task)
-    if tp is None or tp.control_cap is None or dist is None:
+    if tp is None or tp.control_cap is None:
         return False
-    return min(dist) > tp.control_cap
+    return min(threshold_distances(task, root)) > tp.control_cap
 
 
 def _eligible_control(task: Task) -> bool:
@@ -979,7 +1025,8 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "selected if that distance exceeds the template's cap (column below) in BOTH",
         "vintages: it is obvious from the era alone. UNRATE controls (the low-revision",
         "series) and flips are exempt. Caps: 10 margins for INDPRO (0.5% MoM), PCEPI",
-        "(0.5pp), GDPC1 shrink (0.5% QoQ) and GDPC1 growth (2pp annualized); 40 margins",
+        "(0.5pp) and GDPC1 growth (2pp annualized); 5 margins for GDPC1 shrink (0.25%",
+        "QoQ, about 1pp annualized); 40 margins",
         "(40k jobs) for the PAYEMS templates.",
         f"Candidate controls excluded by this rule: {sum(trivial.values())} "
         "(some are also COVID-excluded).",
