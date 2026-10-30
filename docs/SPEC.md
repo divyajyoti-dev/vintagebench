@@ -27,6 +27,7 @@ answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips,
 - Gold answers computed programmatically from the two vintages; never hand-labeled.
 - Templates (natural questions; thresholds only at round numbers):
   "Did real GDP shrink in <quarter>?"
+  "Did real GDP grow faster than 2% (annualized) in <quarter>?"
   "Was <month> the weakest month for payroll growth in the prior 12 months?"
   "Was average monthly payroll growth over the 3 months ending <month> above 100k/150k?"
   "Did industrial production fall in <month> versus the prior month?"
