@@ -22,6 +22,8 @@ pip install -e ".[dev]"
 cp .env.example .env          # fill in FRED_API_KEY, OPENAI_API_KEY, TOGETHER_API_KEY
 set -a; . ./.env; set +a      # export them into the shell
 python scripts/check_env.py   # checks each key with one free request
+# check_env reports FAIL for TOGETHER_API_KEY when it is unset. That key is needed only
+# if config/models.yaml lists a Together model; the pilot needs only FRED and OpenAI keys.
 pytest && ruff check .        # tests never call the network
 
 # 1. Fetch ALFRED vintages into data/vintages/ (already committed; needs FRED_API_KEY)
@@ -36,7 +38,8 @@ python -m vintagebench.run --tasks tasks/pilot.jsonl --trials 3 --sanity
 # 4. Smoke test: 1 task x 1 trial per model in config/models.yaml (paid, a few cents)
 python -m vintagebench.run --models config/models.yaml --tasks tasks/pilot.jsonl --trials 1 --limit 1
 
-# 5. Estimate the cost of the full run (no API calls; uses cached smoke-test tokens)
+# 5. Estimate the cost of the full run (no API calls; averages tokens over all cached
+#    episodes in runs/cache/ for each model, which now include the full pilot run)
 python -m vintagebench.run --models config/models.yaml --tasks tasks/pilot.jsonl --trials 3 --estimate
 
 # 6. Full run (paid; stops at the budget cap in config/run.yaml)
@@ -50,7 +53,8 @@ request/response is cached in `runs/cache/`, so reruns of the same episodes are 
 
 Full run `runs/20261030-210632/`: 20 tasks (10 flips, 10 controls) × 3 trials per model,
 temperature 0, reasoning off. Total API spend $0.53 (smoke test included). The pilot
-ran 2 models instead of the 3 in SPEC §7: the open-weight Together model was skipped.
+ran 2 models instead of the 3 in SPEC §7: the Together open-weight model was skipped at
+the user's request; no Together API key was configured.
 
 | Model | asof_correct | revised_correct | update_correct (flips) | update_correct (controls) | Leakage | Brier | pass^3 (asof) | Cost (USD) |
 |---|---|---|---|---|---|---|---|---|
