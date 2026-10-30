@@ -28,6 +28,17 @@ tasks/pilot.jsonl and tasks/README.md from data/vintages/).
 
 Only target observations dated 2016-01-01 .. 2025-12-31 are used (SPEC §3).
 All comparisons are strict; exact ties (within ``EPS``) count as "no".
+
+Materiality margin: a candidate is kept only if, in BOTH vintages, the deciding
+quantity is clear of its threshold by at least half the publication unit, so no
+gold answer hinges on a difference below published precision:
+
+- GDPC1: |quarter-over-quarter % change| >= 0.05
+- INDPRO: |month-over-month % change| >= 0.05
+- PCEPI: |12-month % change - 2.5| >= 0.05 percentage points
+- PAYEMS 3-month average: |average - threshold| >= 1 (thousand jobs)
+- PAYEMS weakest-12m: |change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand)
+- UNRATE: none (values are compared after rounding to the published 0.1).
 """
 
 from __future__ import annotations
@@ -124,6 +135,66 @@ def yoy_pct(snapshot: pd.Series, t: pd.Timestamp) -> float | None:
     if now is None or before is None or before == 0:
         return None
     return 100.0 * (now / before - 1.0)
+
+
+def pct_change(snapshot: pd.Series, t: pd.Timestamp, months: int = 1) -> float | None:
+    """Unrounded percent change over ``months``: 100 * (L_t / L_{t-months} - 1)."""
+    s = _normalize(snapshot)
+    now, before = _value(s, t), _value(s, _shift(t, -months))
+    if now is None or before is None or before == 0:
+        return None
+    return 100.0 * (now / before - 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Materiality margins (pure): distance of the deciding quantity from its threshold
+# ---------------------------------------------------------------------------
+
+PCT_MARGIN = 0.05  # half of the 0.1 publication unit for % changes and rates
+PAYROLL_MARGIN_K = 1.0  # PAYEMS is published in whole thousands
+
+
+def gdp_margin(snapshot: pd.Series, quarter: pd.Timestamp) -> float | None:
+    """GDPC1: |quarter-over-quarter % change| (threshold 0)."""
+    p = pct_change(snapshot, quarter, months=3)
+    return None if p is None else abs(p)
+
+
+def mom_pct_margin(snapshot: pd.Series, month: pd.Timestamp) -> float | None:
+    """INDPRO: |month-over-month % change| (threshold 0)."""
+    p = pct_change(snapshot, month)
+    return None if p is None else abs(p)
+
+
+def pce_margin(
+    snapshot: pd.Series, month: pd.Timestamp, threshold_pct: float = 2.5
+) -> float | None:
+    """PCEPI: |12-month % change - threshold| in percentage points."""
+    y = yoy_pct(snapshot, month)
+    return None if y is None else abs(y - threshold_pct)
+
+
+def payrolls_3m_margin(
+    snapshot: pd.Series, month: pd.Timestamp, threshold_k: float
+) -> float | None:
+    """PAYEMS: |3-month average change - threshold| in thousands."""
+    a = avg_change_3m(snapshot, month)
+    return None if a is None else abs(a - threshold_k)
+
+
+def payrolls_weakest_margin(snapshot: pd.Series, month: pd.Timestamp) -> float | None:
+    """PAYEMS: |change(t) - min of the 11 preceding changes| in thousands.
+
+    For a "yes" this is how much the month wins by; for a "no" how far it is above
+    the weakest earlier month.
+    """
+    changes = monthly_changes(snapshot, month, 12)
+    return None if changes is None else abs(changes[-1] - min(changes[:-1]))
+
+
+def is_material(margin: float | None, minimum: float) -> bool:
+    """True iff ``margin`` is known and >= ``minimum`` (within EPS)."""
+    return margin is not None and margin >= minimum - EPS
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +304,9 @@ class Template:
     metric: Callable[[pd.Series, pd.Timestamp], float | None]
     metric_name: str
     definition: str
+    margin: Callable[[pd.Series, pd.Timestamp], float | None] | None = None
+    min_margin: float = 0.0
+    materiality: str = "none"
 
 
 def fell_vs_prior_month_template(label: str, key: str = "mom-fall") -> Template:
@@ -248,6 +322,9 @@ def fell_vs_prior_month_template(label: str, key: str = "mom-fall") -> Template:
         metric=lambda s, t: change(s, t),
         metric_name="one-month change",
         definition="yes iff level(t) < level(t-1 month); a tie is no.",
+        margin=mom_pct_margin,
+        min_margin=PCT_MARGIN,
+        materiality="|100 * (level(t) / level(t-1 month) - 1)| >= 0.05",
     )
 
 
@@ -268,6 +345,9 @@ def _payrolls_3m_template(threshold_k: int) -> Template:
             f"PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > "
             f"{threshold_k}; a tie is no."
         ),
+        margin=lambda s, t: payrolls_3m_margin(s, t, threshold_k),
+        min_margin=PAYROLL_MARGIN_K,
+        materiality=f"|3-month average - {threshold_k}| >= 1 (thousand)",
     )
 
 
@@ -284,6 +364,9 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             metric=lambda s, t: change(s, t, months=3),
             metric_name="quarter-over-quarter change (billions of chained dollars)",
             definition="yes iff level(q) < level(q-1 quarter); a tie is no.",
+            margin=gdp_margin,
+            min_margin=PCT_MARGIN,
+            materiality="|100 * (level(q) / level(q-1 quarter) - 1)| >= 0.05",
         ),
     ),
     "PAYEMS": (
@@ -291,8 +374,8 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             key="weakest-12m",
             months_per_period=1,
             question=lambda t: (
-                f"Was {_month(t)} the weakest month for payroll growth in the prior "
-                f"12 months, i.e. was the monthly change in total nonfarm payrolls "
+                f"Was {_month(t)} the weakest of the 12 months ending in {_month(t)} "
+                f"for payroll growth, i.e. was the monthly change in total nonfarm payrolls "
                 f"(PAYEMS) in {_month(t)} lower than in each of the 11 months before it?"
             ),
             gold=payrolls_weakest_in_12m,
@@ -302,6 +385,9 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
                 "yes iff change(t) is strictly lower than each of change(t-1) .. "
                 "change(t-11), where change(m) = level(m) - level(m-1); any tie is no."
             ),
+            margin=payrolls_weakest_margin,
+            min_margin=PAYROLL_MARGIN_K,
+            materiality="|change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand)",
         ),
         _payrolls_3m_template(100),
         _payrolls_3m_template(150),
@@ -312,14 +398,17 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             key="yoy-above-2.5",
             months_per_period=1,
             question=lambda t: (
-                f"Is PCE inflation (year over year) above 2.5% as of {_month(t)}, i.e. "
-                f"is the unrounded 12-month percent change in the PCE price index "
+                f"Is PCE inflation (year over year) above 2.5% for {_month(t)}, i.e. "
+                f"is the 12-month percent change in the PCE price index "
                 f"(PCEPI) from {_month(_shift(t, -12))} to {_month(t)} above 2.5%?"
             ),
             gold=lambda s, t: pce_yoy_above(s, t, 2.5),
             metric=yoy_pct,
             metric_name="12-month % change",
             definition="yes iff 100 * (level(t) / level(t-12 months) - 1) > 2.5, unrounded.",
+            margin=lambda s, t: pce_margin(s, t, 2.5),
+            min_margin=PCT_MARGIN,
+            materiality="|12-month % change - 2.5| >= 0.05 (percentage points)",
         ),
     ),
     "UNRATE": (
@@ -335,6 +424,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             metric=lambda s, t: change(s, t),
             metric_name="one-month change (percentage points)",
             definition="yes iff round(rate(t), 1) > round(rate(t-1 month), 1); equal is no.",
+            materiality="none (compared at the published 0.1 precision)",
         ),
     ),
 }
@@ -352,6 +442,12 @@ def revision_date_for(as_of: date, vintages: list[date]) -> date | None:
         return None
     target = (pd.Timestamp(as_of) + pd.DateOffset(years=1)).date()
     return next((v for v in later if v >= target), later[-1])
+
+
+def _materiality_note(template: Template) -> str:
+    if template.margin is None:
+        return f"Materiality filter: {template.materiality}."
+    return f"Kept only if, in both vintages, {template.materiality}."
 
 
 def _fmt(x: float | None) -> str:
@@ -419,9 +515,14 @@ def _make_task(
     gold_as_of, gold_rev = template.gold(s_as_of, t), template.gold(s_rev, t)
     if gold_as_of is None or gold_rev is None:
         return None  # missing data in either vintage: skip, never guess
+    if template.margin is not None and not all(
+        is_material(template.margin(s, t), template.min_margin) for s in (s_as_of, s_rev)
+    ):
+        return None  # answer hinges on a difference below published precision
     notes = (
-        f"Definition: {template.definition} as_of_date = first release of the target "
-        f"observation; revision_date = first vintage >= 1 year later (else latest). "
+        f"Definition: {template.definition} {_materiality_note(template)} "
+        "as_of_date = first release of the target observation; "
+        "revision_date = first vintage >= 1 year later (else latest). "
         f"{template.metric_name}: as-of {_fmt(template.metric(s_as_of, t))}, "
         f"revised {_fmt(template.metric(s_rev, t))}."
     )
@@ -459,37 +560,93 @@ def _template_key(task: Task) -> str:
 def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Task]:
     """Select a seeded, balanced pilot set (~half flips, spread across series/years).
 
-    Algorithm: drop duplicate ids and targets outside 2016–2025; shuffle each pool
-    with ``random.Random(seed)``. Pick ``n // 2`` flips from non-UNRATE series, then
-    exactly 2 UNRATE controls, then fill to ``n`` with non-UNRATE controls. Each pick
-    is greedy: the candidate whose series, template and year are least used so far
-    (in that order), ties broken by the shuffled order. At most one task per
-    (series, target period). If flips run short, controls fill the gap and a
-    warning reports the actual balance. Output is sorted by id.
+    Algorithm: drop duplicate ids and targets outside 2016–2025; shuffle with
+    ``random.Random(seed)``. Stratify on (flips, gold_as_of) so that the as-of
+    answer is ~half Yes / ~half No within flips and within controls:
+
+    - flips (non-UNRATE): ``n // 2``, split Yes/No as evenly as possible;
+    - UNRATE controls: exactly 2 (one Yes, one No when available);
+    - other controls: the rest, split so controls overall are ~half Yes.
+
+    Strata are filled round-robin, one task at a time; each pick is greedy: the
+    candidate whose series is least used among already chosen tasks with the same
+    flips value, then whose series, template and year are least used overall (in
+    that order), ties broken by the shuffled order. At most one task per (series,
+    target period). A short stratum is filled first from its sibling (same group,
+    other answer), then from any non-UNRATE candidate; every shortfall is reported
+    in a warning. Output is sorted by id.
     """
     rng = random.Random(seed)
     unique = {t.id: t for t in sorted(candidates, key=lambda t: t.id)}
     pool = [t for t in unique.values() if FIRST_YEAR <= int(_period_key(t)[:4]) <= LAST_YEAR]
     rng.shuffle(pool)
 
-    flips = [t for t in pool if t.flips and t.series_id != CONTROL_SERIES]
-    unrate = [t for t in pool if not t.flips and t.series_id == CONTROL_SERIES]
-    controls = [t for t in pool if not t.flips and t.series_id != CONTROL_SERIES]
+    def stratum(flips: bool, yes: bool, unrate: bool) -> list[Task]:
+        return [
+            t
+            for t in pool
+            if t.flips == flips
+            and bool(t.gold_as_of) == yes
+            and (t.series_id == CONTROL_SERIES) == unrate
+            and not (flips and unrate)
+        ]
+
+    n_flip = n // 2
+    n_ctrl = n - n_flip
+    n_unr = min(N_CONTROL_SERIES, n_ctrl)
+    ctrl_yes = max(n_ctrl - n_ctrl // 2 - n_unr // 2, 0)
+    groups = [  # (name, [(stratum name, pool, quota), ...])
+        (
+            "flips",
+            [
+                ("flip/as-of Yes", stratum(True, True, False), n_flip - n_flip // 2),
+                ("flip/as-of No", stratum(True, False, False), n_flip // 2),
+            ],
+        ),
+        (
+            f"{CONTROL_SERIES} controls",
+            [
+                (f"{CONTROL_SERIES} control/as-of Yes", stratum(False, True, True), n_unr // 2),
+                (
+                    f"{CONTROL_SERIES} control/as-of No",
+                    stratum(False, False, True),
+                    n_unr - n_unr // 2,
+                ),
+            ],
+        ),
+        (
+            "controls",
+            [
+                ("control/as-of Yes", stratum(False, True, False), ctrl_yes),
+                ("control/as-of No", stratum(False, False, False), n_ctrl - n_unr - ctrl_yes),
+            ],
+        ),
+    ]
+    strata = [st for _, sts in groups for st in sts]
 
     picker = _Picker()
-    n_unrate = min(N_CONTROL_SERIES, len(unrate), n)
-    picker.take(flips, min(n // 2, n - n_unrate))
-    picker.take(unrate, n_unrate)
-    picker.take(controls, n - len(picker.chosen))
-    picker.take(flips, n - len(picker.chosen))  # top up if controls ran short
+    got = {name: 0 for name, _, _ in strata}
+    active = True
+    while active:  # round-robin over strata
+        active = False
+        for name, spool, quota in strata:
+            if got[name] < quota and picker.take(spool, 1):
+                got[name] += 1
+                active = True
+    for _, sts in groups:  # sibling fallback, keeps the group's size
+        deficit = sum(q for _, _, q in sts) - sum(got[name] for name, _, _ in sts)
+        picker.take([t for _, sp, _ in sts for t in sp], deficit)
+    others = [t for t in pool if t.series_id != CONTROL_SERIES]
+    picker.take(others, n - len(picker.chosen))
 
     chosen = picker.chosen
-    n_flips = sum(t.flips for t in chosen)
-    if len(chosen) < n or n_flips != n // 2 or n_unrate < min(N_CONTROL_SERIES, n):
+    short = [f"{name} {got[name]}/{quota}" for name, _, quota in strata if got[name] < quota]
+    if short or len(chosen) < n:
+        n_flips = sum(t.flips for t in chosen)
+        n_yes = sum(bool(t.gold_as_of) for t in chosen)
         warnings.warn(
-            f"select_pilot: wanted {n} tasks ({n // 2} flips, {N_CONTROL_SERIES} "
-            f"{CONTROL_SERIES} controls); got {len(chosen)} tasks with {n_flips} flips "
-            f"and {n_unrate} {CONTROL_SERIES} controls.",
+            f"select_pilot: strata short (got/wanted): {', '.join(short) or 'none'}; "
+            f"got {len(chosen)}/{n} tasks: {n_flips} flips, {n_yes} as-of Yes.",
             stacklevel=2,
         )
     return sorted(chosen, key=lambda t: t.id)
@@ -500,29 +657,38 @@ class _Picker:
 
     def __init__(self) -> None:
         self.chosen: list[Task] = []
+        self.ids: set[str] = set()
         self.series: Counter[str] = Counter()
+        self.series_group: Counter[tuple[str, bool]] = Counter()
         self.templates: Counter[str] = Counter()
         self.years: Counter[str] = Counter()
         self.targets: set[tuple[str, str]] = set()
 
-    def take(self, pool: list[Task], k: int) -> None:
+    def take(self, pool: list[Task], k: int) -> int:
+        """Pick up to ``k`` tasks from ``pool``; return how many were picked."""
+        taken = 0
         for _ in range(max(k, 0)):
             avail = [
                 (i, t)
                 for i, t in enumerate(pool)
-                if t not in self.chosen and (t.series_id, _period_key(t)) not in self.targets
+                if t.id not in self.ids and (t.series_id, _period_key(t)) not in self.targets
             ]
             if not avail:
-                return
+                break
             _, best = min(avail, key=lambda it: (*self._score(it[1]), it[0]))
             self.chosen.append(best)
+            self.ids.add(best.id)
             self.series[best.series_id] += 1
+            self.series_group[(best.series_id, best.flips)] += 1
             self.templates[_template_key(best)] += 1
             self.years[_period_key(best)[:4]] += 1
             self.targets.add((best.series_id, _period_key(best)))
+            taken += 1
+        return taken
 
-    def _score(self, t: Task) -> tuple[int, int, int]:
+    def _score(self, t: Task) -> tuple[int, int, int, int]:
         return (
+            self.series_group[(t.series_id, t.flips)],
             self.series[t.series_id],
             self.templates[_template_key(t)],
             self.years[_period_key(t)[:4]],
@@ -571,7 +737,7 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         c = counts.setdefault((t.series_id, _template_key(t)), [0, 0])
         c[0] += 1
         c[1] += t.flips
-    defs = {f"{s.lower()}-{tp.key}": tp.definition for s, tps in TEMPLATES.items() for tp in tps}
+    tpl = {f"{s.lower()}-{tp.key}": tp for s, tps in TEMPLATES.items() for tp in tps}
     n_flips = sum(t.flips for t in pilot)
     n_unrate = sum(t.series_id == CONTROL_SERIES for t in pilot)
     lines = [
@@ -599,13 +765,20 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "## Templates",
         "",
         "Comparisons are strict; exact ties count as No. Candidates with any needed",
-        "observation missing in either vintage are skipped.",
+        "observation missing in either vintage are skipped. Materiality margin: a",
+        "candidate is kept only if, in BOTH vintages, the deciding quantity is clear of",
+        "its threshold by at least half the publication unit (column below), so no gold",
+        "answer hinges on a difference below published precision. Counts are after",
+        "this filter.",
         "",
-        "| template | definition | candidates | flips |",
-        "|---|---|---|---|",
+        "| template | definition | materiality margin (both vintages) | candidates | flips |",
+        "|---|---|---|---|---|",
     ]
     for (series, key), (total, flips) in sorted(counts.items()):
-        lines.append(f"| {key} ({series}) | {defs.get(key, '')} | {total} | {flips} |")
+        tp = tpl.get(key)
+        definition, margin = (tp.definition, tp.materiality) if tp else ("", "")
+        lines.append(f"| {key} ({series}) | {definition} | {margin} | {total} | {flips} |")
+    lines += _balance_lines(pilot)
     lines += [
         "",
         "## Pilot tasks",
@@ -619,6 +792,34 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
             f"{'yes' if t.flips else 'no'} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def _share(k: int, n: int) -> str:
+    return f"{k}/{n} ({100 * k / n:.0f}%)" if n else "0/0"
+
+
+def _balance_lines(pilot: list[Task]) -> list[str]:
+    n = len(pilot)
+    yes_as_of = sum(bool(t.gold_as_of) for t in pilot)
+    yes_rev = sum(bool(t.gold_revised) for t in pilot)
+
+    def cell(flips: bool, yes: bool) -> int:
+        return sum(t.flips == flips and bool(t.gold_as_of) == yes for t in pilot)
+
+    return [
+        "",
+        "## Answer balance (pilot)",
+        "",
+        "| | as-of Yes | as-of No |",
+        "|---|---|---|",
+        f"| flips | {cell(True, True)} | {cell(True, False)} |",
+        f"| controls | {cell(False, True)} | {cell(False, False)} |",
+        "",
+        f"- Share of Yes: as-of {_share(yes_as_of, n)}; revised {_share(yes_rev, n)}.",
+        f"- Majority-class baseline (always answer the more common gold): as-of "
+        f"{_share(max(yes_as_of, n - yes_as_of), n)}, revised "
+        f"{_share(max(yes_rev, n - yes_rev), n)}.",
+    ]
 
 
 def main(root: Path = data.DATA_DIR, out_dir: Path = TASKS_DIR, seed: int = PILOT_SEED) -> None:

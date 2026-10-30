@@ -30,7 +30,7 @@ answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips,
   "Was <month> the weakest month for payroll growth in the prior 12 months?"
   "Was average monthly payroll growth over the 3 months ending <month> above 100k/150k?"
   "Did industrial production fall in <month> versus the prior month?"
-  "Is PCE inflation (year over year) above 2.5% as of <month>?"
+  "Is PCE inflation (year over year) above 2.5% for <month>?"
 - Pilot selection: 20 tasks across 2016–2025: ~10 with flips=true, ~10 controls
   (including 2 UNRATE). Spread across series and years; no duplicates. Seeded.
 - tasks/README.md: table of all tasks (question, as-of answer, revised answer, flips).
@@ -51,7 +51,7 @@ answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips,
 - Grader (deterministic, no LLM judge): asof_correct, revised_correct, update_correct
   (changed == flips), leakage (a values_used entry matches a later vintage but not the
   as-of vintage, with rounding tolerance), Brier score.
-- Sanity agents (no API): oracle (100% everything, 0 leakage), always_yes (~50%),
+- Sanity agents (no API): oracle (100% everything, 0 leakage), always_yes (scores the share of yes golds; ~50% on a balanced set),
   leaker (reads latest vintage; leakage flagged wherever values differ),
   never_update (update_correct only on controls).
 - CLI: python -m vintagebench.run --models config/models.yaml --tasks tasks/pilot.jsonl
