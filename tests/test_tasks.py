@@ -351,3 +351,29 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
     assert out.read_text() == (FIXTURES / "tasks.jsonl").read_text()
     assert [type(r.gold_as_of) for r in tasks.load_tasks(out)] == [bool, bool, float]
     assert list(dataclasses.asdict(rows[0])) == [f.name for f in dataclasses.fields(Task)]
+
+
+# --- README / entry point ---------------------------------------------------
+
+
+@pytest.mark.usefixtures("toy")
+def test_main_writes_pilot_and_readme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tasks, "SERIES", ("TOY",))
+    with pytest.warns(UserWarning):  # TOY has only one flip and no UNRATE
+        tasks.main(root=TOY_ROOT, out_dir=tmp_path, seed=0)
+    pilot = tasks.load_tasks(tmp_path / "pilot.jsonl")
+    readme = (tmp_path / "README.md").read_text()
+    assert any(t.flips for t in pilot)
+    assert "| toy-mom-fall (TOY) |" in readme and "| 11 | 1 |" in readme
+    for t in pilot:
+        row = f"| {t.id} | {t.question} | {'Yes' if t.gold_as_of else 'No'} |"
+        assert row in readme
+
+
+@pytest.mark.usefixtures("toy")
+def test_skips_targets_first_seen_in_pre_2016_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pretend TOY's first vintage (2021-01-15) is a baseline: every target is first
+    # seen there, so none is a genuine first release.
+    assert len(tasks.build_candidates(["TOY"], TOY_ROOT)) == 11
+    monkeypatch.setattr(tasks, "BASELINE_CUTOFF", date(2021, 2, 1))
+    assert tasks.build_candidates(["TOY"], TOY_ROOT) == []
