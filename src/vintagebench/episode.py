@@ -84,7 +84,6 @@ SERIES_METADATA: dict[str, dict[str, str]] = {
         "frequency": "Monthly",
         "seasonal_adjustment": _SA,
     },
-    "TOY": {"title": "Toy test series", "units": "Index", "frequency": "Monthly"},
 }
 
 SYSTEM_PROMPT = """Today is {as_of_date}. You are an economic data analyst.
