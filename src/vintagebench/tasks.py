@@ -1,14 +1,49 @@
-"""Task schema, candidate generation and pilot selection (SPEC §3, §5)."""
+"""Task schema, candidate generation and pilot selection (SPEC §3, §5).
+
+Gold answers are computed by small pure functions over a *snapshot*: the
+``pd.Series`` returned by :func:`vintagebench.data.get_as_of` (values indexed by
+observation_date, as known on one date). Each SPEC §3 template has one gold
+function. A gold function returns ``None`` when an observation it needs is missing
+(or NaN); such candidates are skipped, never guessed.
+
+Date rules (applied by :func:`build_candidates`, per target observation ``t``):
+
+- ``as_of_date`` = the first vintage date on which ``t`` appears, i.e. the
+  observation's first release. The question is therefore answerable from the
+  as-of vintage alone (it is skipped if any other needed observation is missing).
+- ``revision_date`` = the first vintage date at least one year after
+  ``as_of_date``; if no such vintage exists, the latest vintage date after
+  ``as_of_date``. Candidates with no later vintage are skipped.
+- ``flips`` = ``gold_as_of != gold_revised``.
+
+Only target observations dated 2016-01-01 .. 2025-12-31 are used (SPEC §3).
+All comparisons are strict; exact ties (within ``EPS``) count as "no".
+"""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import dataclasses
+import json
+import random
+import warnings
+from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
+import pandas as pd
+
+from vintagebench import data
+
 AnswerType = Literal["yes_no", "number"]
 Answer = bool | float
+
+EPS = 1e-9  # float tolerance: |a - b| <= EPS is a tie
+FIRST_YEAR, LAST_YEAR = 2016, 2025
+CONTROL_SERIES = "UNRATE"
+N_CONTROL_SERIES = 2
 
 
 @dataclass(frozen=True)
@@ -31,24 +66,470 @@ class Task:
     notes: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Snapshot helpers (pure)
+# ---------------------------------------------------------------------------
+
+
+def _normalize(snapshot: pd.Series) -> pd.Series:
+    """Index by Timestamp, drop NaN values, sort by observation date."""
+    s = snapshot.dropna().astype(float)
+    s.index = pd.to_datetime(s.index)
+    return s.sort_index()
+
+
+def _shift(t: pd.Timestamp, months: int) -> pd.Timestamp:
+    return pd.Timestamp(t) + pd.DateOffset(months=months)
+
+
+def _value(s: pd.Series, t: pd.Timestamp) -> float | None:
+    v = s.get(pd.Timestamp(t))
+    return None if v is None or pd.isna(v) else float(v)
+
+
+def change(snapshot: pd.Series, t: pd.Timestamp, months: int = 1) -> float | None:
+    """Level at ``t`` minus level ``months`` earlier; None if either is missing."""
+    s = _normalize(snapshot)
+    now, before = _value(s, t), _value(s, _shift(t, -months))
+    return None if now is None or before is None else now - before
+
+
+def monthly_changes(snapshot: pd.Series, t: pd.Timestamp, n: int) -> list[float] | None:
+    """One-month changes for the ``n`` months ending at ``t`` (oldest first)."""
+    out = [change(snapshot, _shift(t, -k)) for k in range(n - 1, -1, -1)]
+    return None if any(c is None for c in out) else [float(c) for c in out]  # type: ignore[arg-type]
+
+
+def avg_change_3m(snapshot: pd.Series, t: pd.Timestamp) -> float | None:
+    """Average one-month change over the 3 months ending at ``t``: (L_t - L_{t-3}) / 3."""
+    d = change(snapshot, t, months=3)
+    return None if d is None else d / 3
+
+
+def yoy_pct(snapshot: pd.Series, t: pd.Timestamp) -> float | None:
+    """Unrounded 12-month percent change: 100 * (L_t / L_{t-12} - 1)."""
+    s = _normalize(snapshot)
+    now, before = _value(s, t), _value(s, _shift(t, -12))
+    if now is None or before is None or before == 0:
+        return None
+    return 100.0 * (now / before - 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Gold functions, one per SPEC §3 template (pure)
+# ---------------------------------------------------------------------------
+
+
+def real_gdp_shrank(snapshot: pd.Series, quarter: pd.Timestamp) -> bool | None:
+    """GDPC1: yes iff real GDP in ``quarter`` < real GDP in the previous quarter.
+
+    ``quarter`` is the quarter's first day (ALFRED convention). Tie -> no.
+    """
+    d = change(snapshot, quarter, months=3)
+    return None if d is None else d < -EPS
+
+
+def payrolls_weakest_in_12m(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
+    """PAYEMS: yes iff ``month``'s one-month change is strictly lower than each of
+    the 11 preceding months' one-month changes.
+
+    "The prior 12 months" is read as the 12-month window ending in (and including)
+    ``month``. Needs 13 levels (t-12 .. t). A tie with any earlier month -> no.
+    """
+    changes = monthly_changes(snapshot, month, 12)
+    if changes is None:
+        return None
+    this, earlier = changes[-1], changes[:-1]
+    return all(this < c - EPS for c in earlier)
+
+
+def payrolls_3m_avg_above(
+    snapshot: pd.Series, month: pd.Timestamp, threshold_k: float
+) -> bool | None:
+    """PAYEMS (thousands): yes iff (L_t - L_{t-3}) / 3 > ``threshold_k``. Tie -> no."""
+    d = change(snapshot, month, months=3)
+    return None if d is None else d > 3 * threshold_k + EPS
+
+
+def fell_vs_prior_month(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
+    """Yes iff the level in ``month`` < the level in the prior month. Tie -> no.
+
+    Used for INDPRO ("Did industrial production fall in <month>?").
+    """
+    d = change(snapshot, month)
+    return None if d is None else d < -EPS
+
+
+def industrial_production_fell(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
+    """INDPRO: alias of :func:`fell_vs_prior_month`."""
+    return fell_vs_prior_month(snapshot, month)
+
+
+def pce_yoy_above(
+    snapshot: pd.Series, month: pd.Timestamp, threshold_pct: float = 2.5
+) -> bool | None:
+    """PCEPI: yes iff the unrounded 12-month % change in the index > ``threshold_pct``.
+
+    Tie (within EPS) -> no. Note BEA reports this rate rounded to 0.1; we use the
+    unrounded value and say so in the question.
+    """
+    y = yoy_pct(snapshot, month)
+    return None if y is None else y > threshold_pct + EPS
+
+
+def unrate_rose(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
+    """UNRATE control: yes iff the rate in ``month`` > the rate in the prior month.
+
+    Design choice: SPEC §3 has no UNRATE template, so UNRATE (the low-revision
+    control series) gets the analogue of the INDPRO question: "Did the
+    unemployment rate rise in <month> versus the prior month?". Both values are
+    rounded to 0.1 (the published precision) before comparing, so float noise or
+    stray extra digits never create a change; equal rounded rates -> no.
+    """
+    s = _normalize(snapshot)
+    now, before = _value(s, month), _value(s, _shift(month, -1))
+    if now is None or before is None:
+        return None
+    return round(now, 1) > round(before, 1)
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+
+def _month(t: pd.Timestamp) -> str:
+    return pd.Timestamp(t).strftime("%B %Y")
+
+
+def _quarter(t: pd.Timestamp) -> str:
+    t = pd.Timestamp(t)
+    return f"Q{t.quarter} {t.year}"
+
+
+@dataclass(frozen=True)
+class Template:
+    """A question template bound to one series.
+
+    ``gold`` and ``metric`` are pure functions of (snapshot, target period);
+    ``metric`` is the underlying number, reported in ``notes``.
+    """
+
+    key: str
+    months_per_period: int  # 1 = monthly, 3 = quarterly
+    question: Callable[[pd.Timestamp], str]
+    gold: Callable[[pd.Series, pd.Timestamp], bool | None]
+    metric: Callable[[pd.Series, pd.Timestamp], float | None]
+    metric_name: str
+    definition: str
+
+
+def fell_vs_prior_month_template(label: str, key: str = "mom-fall") -> Template:
+    """'Did <label> fall in <month> versus the prior month?' (INDPRO; reusable in tests)."""
+    return Template(
+        key=key,
+        months_per_period=1,
+        question=lambda t: (
+            f"Did {label} fall in {_month(t)} versus the prior month, i.e. was its "
+            f"level in {_month(t)} lower than in {_month(_shift(t, -1))}?"
+        ),
+        gold=fell_vs_prior_month,
+        metric=lambda s, t: change(s, t),
+        metric_name="one-month change",
+        definition="yes iff level(t) < level(t-1 month); a tie is no.",
+    )
+
+
+def _payrolls_3m_template(threshold_k: int) -> Template:
+    return Template(
+        key=f"avg3m-above-{threshold_k}k",
+        months_per_period=1,
+        question=lambda t: (
+            "Was average monthly payroll growth over the 3 months ending "
+            f"{_month(t)} above {threshold_k}k, i.e. was the average monthly change "
+            f"in total nonfarm payrolls (PAYEMS) from {_month(_shift(t, -2))} through "
+            f"{_month(t)} above {threshold_k},000 jobs?"
+        ),
+        gold=lambda s, t: payrolls_3m_avg_above(s, t, threshold_k),
+        metric=avg_change_3m,
+        metric_name="3-month average change (thousands)",
+        definition=(
+            f"PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > "
+            f"{threshold_k}; a tie is no."
+        ),
+    )
+
+
+TEMPLATES: dict[str, tuple[Template, ...]] = {
+    "GDPC1": (
+        Template(
+            key="qoq-shrink",
+            months_per_period=3,
+            question=lambda t: (
+                f"Did real GDP shrink in {_quarter(t)}, i.e. was real GDP (GDPC1) in "
+                f"{_quarter(t)} lower than in {_quarter(_shift(t, -3))}?"
+            ),
+            gold=real_gdp_shrank,
+            metric=lambda s, t: change(s, t, months=3),
+            metric_name="quarter-over-quarter change (billions of chained dollars)",
+            definition="yes iff level(q) < level(q-1 quarter); a tie is no.",
+        ),
+    ),
+    "PAYEMS": (
+        Template(
+            key="weakest-12m",
+            months_per_period=1,
+            question=lambda t: (
+                f"Was {_month(t)} the weakest month for payroll growth in the prior "
+                f"12 months, i.e. was the monthly change in total nonfarm payrolls "
+                f"(PAYEMS) in {_month(t)} lower than in each of the 11 months before it?"
+            ),
+            gold=payrolls_weakest_in_12m,
+            metric=lambda s, t: change(s, t),
+            metric_name="one-month change (thousands)",
+            definition=(
+                "yes iff change(t) is strictly lower than each of change(t-1) .. "
+                "change(t-11), where change(m) = level(m) - level(m-1); any tie is no."
+            ),
+        ),
+        _payrolls_3m_template(100),
+        _payrolls_3m_template(150),
+    ),
+    "INDPRO": (fell_vs_prior_month_template("industrial production (INDPRO)"),),
+    "PCEPI": (
+        Template(
+            key="yoy-above-2.5",
+            months_per_period=1,
+            question=lambda t: (
+                f"Is PCE inflation (year over year) above 2.5% as of {_month(t)}, i.e. "
+                f"is the unrounded 12-month percent change in the PCE price index "
+                f"(PCEPI) from {_month(_shift(t, -12))} to {_month(t)} above 2.5%?"
+            ),
+            gold=lambda s, t: pce_yoy_above(s, t, 2.5),
+            metric=yoy_pct,
+            metric_name="12-month % change",
+            definition="yes iff 100 * (level(t) / level(t-12 months) - 1) > 2.5, unrounded.",
+        ),
+    ),
+    "UNRATE": (
+        Template(
+            key="mom-rise",
+            months_per_period=1,
+            question=lambda t: (
+                f"Did the unemployment rate (UNRATE) rise in {_month(t)} versus the "
+                f"prior month, i.e. was it higher than in {_month(_shift(t, -1))} "
+                "(as published, to one decimal place)?"
+            ),
+            gold=unrate_rose,
+            metric=lambda s, t: change(s, t),
+            metric_name="one-month change (percentage points)",
+            definition="yes iff round(rate(t), 1) > round(rate(t-1 month), 1); equal is no.",
+        ),
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Candidate generation
+# ---------------------------------------------------------------------------
+
+
+def revision_date_for(as_of: date, vintages: list[date]) -> date | None:
+    """First vintage >= as_of + 1 year; else the latest vintage after as_of; else None."""
+    later = sorted(v for v in vintages if v > as_of)
+    if not later:
+        return None
+    target = (pd.Timestamp(as_of) + pd.DateOffset(years=1)).date()
+    return next((v for v in later if v >= target), later[-1])
+
+
+def _fmt(x: float | None) -> str:
+    return "n/a" if x is None else f"{x:.4g}"
+
+
+def _task_id(series_id: str, template: Template, t: pd.Timestamp) -> str:
+    return f"{series_id.lower()}-{template.key}-{pd.Timestamp(t):%Y-%m}"
+
+
 def build_candidates(series_ids: Iterable[str], root: Path) -> list[Task]:
     """Generate all candidate tasks from the SPEC §3 templates for ``series_ids``.
 
-    ``root`` is the vintage data directory. Gold answers are computed from vintages.
+    ``root`` is the vintage data directory. Gold answers are computed from vintages
+    via :func:`vintagebench.data.get_as_of` (date rules in the module docstring).
     """
-    raise NotImplementedError
+    out: list[Task] = []
+    for series_id in series_ids:
+        if series_id not in TEMPLATES:
+            raise ValueError(f"no task template for series {series_id!r}")
+        out.extend(_series_candidates(series_id, root))
+    return out
+
+
+def _series_candidates(series_id: str, root: Path) -> list[Task]:
+    raw = data.load_vintages(series_id, root)
+    first_release = raw.groupby("observation_date")["vintage_date"].min()
+    vintages = sorted(pd.Timestamp(v).date() for v in data.vintage_dates(series_id, root))
+    snapshots: dict[date, pd.Series] = {}
+
+    def snap(d: date) -> pd.Series:
+        if d not in snapshots:
+            snapshots[d] = data.get_as_of(series_id, d, root)
+        return snapshots[d]
+
+    tasks: list[Task] = []
+    for obs, first in sorted(first_release.items()):
+        t = pd.Timestamp(obs)
+        if not FIRST_YEAR <= t.year <= LAST_YEAR:
+            continue
+        as_of = pd.Timestamp(first).date()
+        revised = revision_date_for(as_of, vintages)
+        if revised is None:
+            continue
+        for template in TEMPLATES[series_id]:
+            if (t.month - 1) % template.months_per_period:
+                continue
+            task = _make_task(series_id, template, t, as_of, revised, snap)
+            if task is not None:
+                tasks.append(task)
+    return tasks
+
+
+def _make_task(
+    series_id: str,
+    template: Template,
+    t: pd.Timestamp,
+    as_of: date,
+    revised: date,
+    snap: Callable[[date], pd.Series],
+) -> Task | None:
+    s_as_of, s_rev = snap(as_of), snap(revised)
+    gold_as_of, gold_rev = template.gold(s_as_of, t), template.gold(s_rev, t)
+    if gold_as_of is None or gold_rev is None:
+        return None  # missing data in either vintage: skip, never guess
+    notes = (
+        f"Definition: {template.definition} as_of_date = first release of the target "
+        f"observation; revision_date = first vintage >= 1 year later (else latest). "
+        f"{template.metric_name}: as-of {_fmt(template.metric(s_as_of, t))}, "
+        f"revised {_fmt(template.metric(s_rev, t))}."
+    )
+    return Task(
+        id=_task_id(series_id, template, t),
+        series_id=series_id,
+        as_of_date=as_of.isoformat(),
+        question=template.question(t),
+        answer_type="yes_no",
+        gold_as_of=bool(gold_as_of),
+        revision_date=revised.isoformat(),
+        gold_revised=bool(gold_rev),
+        flips=bool(gold_as_of) != bool(gold_rev),
+        notes=notes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pilot selection
+# ---------------------------------------------------------------------------
+
+
+def _period_key(task: Task) -> str:
+    """Target period 'YYYY-MM' (from the id suffix; falls back to as_of_date)."""
+    suffix = task.id[-7:]
+    if len(suffix) == 7 and suffix[4] == "-" and suffix.replace("-", "").isdigit():
+        return suffix
+    return task.as_of_date[:7]
+
+
+def _template_key(task: Task) -> str:
+    return task.id[: -len(_period_key(task)) - 1] if task.id.endswith(_period_key(task)) else ""
 
 
 def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Task]:
-    """Select a seeded, balanced pilot set (~half flips, spread across series/years)."""
-    raise NotImplementedError
+    """Select a seeded, balanced pilot set (~half flips, spread across series/years).
+
+    Algorithm: drop duplicate ids and targets outside 2016–2025; shuffle each pool
+    with ``random.Random(seed)``. Pick ``n // 2`` flips from non-UNRATE series, then
+    exactly 2 UNRATE controls, then fill to ``n`` with non-UNRATE controls. Each pick
+    is greedy: the candidate whose series, template and year are least used so far
+    (in that order), ties broken by the shuffled order. At most one task per
+    (series, target period). If flips run short, controls fill the gap and a
+    warning reports the actual balance. Output is sorted by id.
+    """
+    rng = random.Random(seed)
+    unique = {t.id: t for t in sorted(candidates, key=lambda t: t.id)}
+    pool = [t for t in unique.values() if FIRST_YEAR <= int(_period_key(t)[:4]) <= LAST_YEAR]
+    rng.shuffle(pool)
+
+    flips = [t for t in pool if t.flips and t.series_id != CONTROL_SERIES]
+    unrate = [t for t in pool if not t.flips and t.series_id == CONTROL_SERIES]
+    controls = [t for t in pool if not t.flips and t.series_id != CONTROL_SERIES]
+
+    picker = _Picker()
+    n_unrate = min(N_CONTROL_SERIES, len(unrate), n)
+    picker.take(flips, min(n // 2, n - n_unrate))
+    picker.take(unrate, n_unrate)
+    picker.take(controls, n - len(picker.chosen))
+    picker.take(flips, n - len(picker.chosen))  # top up if controls ran short
+
+    chosen = picker.chosen
+    n_flips = sum(t.flips for t in chosen)
+    if len(chosen) < n or n_flips != n // 2 or n_unrate < min(N_CONTROL_SERIES, n):
+        warnings.warn(
+            f"select_pilot: wanted {n} tasks ({n // 2} flips, {N_CONTROL_SERIES} "
+            f"{CONTROL_SERIES} controls); got {len(chosen)} tasks with {n_flips} flips "
+            f"and {n_unrate} {CONTROL_SERIES} controls.",
+            stacklevel=2,
+        )
+    return sorted(chosen, key=lambda t: t.id)
+
+
+class _Picker:
+    """Greedy spread-maximizing picker with shared usage counters."""
+
+    def __init__(self) -> None:
+        self.chosen: list[Task] = []
+        self.series: Counter[str] = Counter()
+        self.templates: Counter[str] = Counter()
+        self.years: Counter[str] = Counter()
+        self.targets: set[tuple[str, str]] = set()
+
+    def take(self, pool: list[Task], k: int) -> None:
+        for _ in range(max(k, 0)):
+            avail = [
+                (i, t)
+                for i, t in enumerate(pool)
+                if t not in self.chosen and (t.series_id, _period_key(t)) not in self.targets
+            ]
+            if not avail:
+                return
+            _, best = min(avail, key=lambda it: (*self._score(it[1]), it[0]))
+            self.chosen.append(best)
+            self.series[best.series_id] += 1
+            self.templates[_template_key(best)] += 1
+            self.years[_period_key(best)[:4]] += 1
+            self.targets.add((best.series_id, _period_key(best)))
+
+    def _score(self, t: Task) -> tuple[int, int, int]:
+        return (
+            self.series[t.series_id],
+            self.templates[_template_key(t)],
+            self.years[_period_key(t)[:4]],
+        )
+
+
+# ---------------------------------------------------------------------------
+# I/O
+# ---------------------------------------------------------------------------
 
 
 def save_tasks(path: Path, tasks: Iterable[Task]) -> None:
-    """Write tasks to ``path`` as JSON Lines, one Task per line."""
-    raise NotImplementedError
+    """Write tasks to ``path`` as JSON Lines, one Task per line (field order kept)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(dataclasses.asdict(t)) for t in tasks]
+    path.write_text("".join(line + "\n" for line in lines))
 
 
 def load_tasks(path: Path) -> list[Task]:
     """Read tasks from a JSON Lines file written by :func:`save_tasks`."""
-    raise NotImplementedError
+    text = Path(path).read_text()
+    return [Task(**json.loads(line)) for line in text.splitlines() if line.strip()]
