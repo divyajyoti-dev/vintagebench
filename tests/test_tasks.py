@@ -547,7 +547,9 @@ def test_gdp_growth_template_question() -> None:
 @pytest.mark.parametrize(
     ("task_id", "overlaps"),
     [
-        ("gdpc1-qoq-shrink-2020-01", False),
+        ("gdpc1-qoq-shrink-2019-10", False),  # Q3-Q4 2019: clear
+        ("gdpc1-qoq-shrink-2020-01", True),  # 2020 Q1 contains March 2020
+        ("gdpc1-growth-above-2-2020-01", True),
         ("gdpc1-qoq-shrink-2020-04", True),  # 2020 Q2
         ("gdpc1-growth-above-2-2020-07", True),  # 2020 Q3
         ("gdpc1-qoq-shrink-2020-10", True),  # compares with Q3

@@ -34,6 +34,12 @@ answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips,
   "Is PCE inflation (year over year) above 2.5% for <month>?"
 - Pilot selection: 20 tasks across 2016–2025: ~10 with flips=true, ~10 controls
   (including 2 UNRATE). Spread across series and years; no duplicates. Seeded.
+  - Materiality: a candidate is kept only if, in both the as-of and revised vintages,
+    the deciding quantity clears its threshold by about half a publication unit
+    (e.g. 0.05 for % changes, 1k jobs for payrolls); see tasks/README.md.
+  - Stratified on flips × as-of answer (5/5/5/5; the 2 UNRATE controls are 1 Yes,
+    1 No). Controls whose computation window touches the COVID collapse
+    (Mar–Jun 2020; 2020 Q1–Q3 for GDP) are excluded; flips there stay eligible.
 - tasks/README.md: table of all tasks (question, as-of answer, revised answer, flips).
 
 ## 4. Harness
