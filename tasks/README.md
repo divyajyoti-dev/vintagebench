@@ -20,12 +20,14 @@ hand. Gold answers are computed programmatically from two vintages (SPEC §3).
 ## COVID exclusion (controls only)
 
 No control is selected if any observation its answer reads falls in the COVID
-collapse: a month from 2020-03 to 2020-06 (monthly series) or 2020 Q2 / Q3
-(GDPC1). The window is the target plus the template's lookback (1 month for
-month-over-month questions, 1 quarter for GDP, 3 months for the payroll
-3-month average, 12 months for weakest-of-12 and PCE YoY). Such controls are
-trivially decided by the collapse. Flips in these windows stay eligible.
-Candidate controls excluded by this rule: 61.
+collapse: a month from 2020-03 to 2020-06 (monthly series); for GDPC1, any
+quarter containing such a month (2020 Q1, Q2) plus the rebound quarter 2020 Q3
+(so 2020 Q4, which compares with Q3, is excluded too). The window is the
+target plus the template's lookback (1 month for month-over-month questions,
+1 quarter for GDP, 3 months for the payroll 3-month average, 12 months for
+weakest-of-12 and PCE YoY). Such controls are trivially decided by the
+collapse. Flips in these windows stay eligible.
+Candidate controls excluded by this rule: 63.
 
 ## Templates
 

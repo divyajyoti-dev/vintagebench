@@ -47,8 +47,9 @@ published precision:
 
 COVID exclusion (controls only, applied in :func:`select_pilot`): a control is
 never selected if any observation its answer reads falls in the COVID collapse,
-i.e. a month from 2020-03 to 2020-06 for monthly series, or 2020 Q2 / Q3 for
-GDPC1. Such controls are trivially decided by the collapse. The window is the
+i.e. a month from 2020-03 to 2020-06 for monthly series, or for GDPC1 any quarter
+containing such a month (2020 Q1, Q2) plus the rebound quarter 2020 Q3. Such
+controls are trivially decided by the collapse. The window is the
 target period plus the template's ``lookback_months`` (e.g. 3 for the payroll
 3-month average, 12 for weakest-of-12 and PCE YoY). Flips there stay eligible.
 """
@@ -642,7 +643,9 @@ def _template_key(task: Task) -> str:
 
 # COVID collapse periods (observation dates) that make a control trivially decided.
 COVID_MONTHS = (date(2020, 3, 1), date(2020, 6, 1))  # monthly series, inclusive
-COVID_QUARTERS = frozenset({date(2020, 4, 1), date(2020, 7, 1)})  # 2020 Q2, Q3
+# Quarters containing a COVID month (2020 Q1 holds March, Q2 holds Apr-Jun) plus the
+# rebound quarter 2020 Q3. 2020 Q4 is excluded via its one-quarter lookback to Q3.
+COVID_QUARTERS = frozenset({date(2020, 1, 1), date(2020, 4, 1), date(2020, 7, 1)})
 
 
 def template_for(task: Task) -> Template | None:
@@ -659,7 +662,8 @@ def covid_window_overlap(task: Task) -> bool:
 
     The window is the target period and every period up to ``lookback_months``
     before it (step = the template's period length). Monthly: any month 2020-03 ..
-    2020-06; quarterly: 2020 Q2 or Q3. Unknown templates use the target alone.
+    2020-06; quarterly: 2020 Q1 or Q2 (they contain such a month) or the rebound
+    quarter 2020 Q3. Unknown templates use the target alone.
     """
     tp = template_for(task)
     lookback = tp.lookback_months if tp else 0
@@ -890,11 +894,13 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "## COVID exclusion (controls only)",
         "",
         "No control is selected if any observation its answer reads falls in the COVID",
-        "collapse: a month from 2020-03 to 2020-06 (monthly series) or 2020 Q2 / Q3",
-        "(GDPC1). The window is the target plus the template's lookback (1 month for",
-        "month-over-month questions, 1 quarter for GDP, 3 months for the payroll",
-        "3-month average, 12 months for weakest-of-12 and PCE YoY). Such controls are",
-        "trivially decided by the collapse. Flips in these windows stay eligible.",
+        "collapse: a month from 2020-03 to 2020-06 (monthly series); for GDPC1, any",
+        "quarter containing such a month (2020 Q1, Q2) plus the rebound quarter 2020 Q3",
+        "(so 2020 Q4, which compares with Q3, is excluded too). The window is the",
+        "target plus the template's lookback (1 month for month-over-month questions,",
+        "1 quarter for GDP, 3 months for the payroll 3-month average, 12 months for",
+        "weakest-of-12 and PCE YoY). Such controls are trivially decided by the",
+        "collapse. Flips in these windows stay eligible.",
         f"Candidate controls excluded by this rule: {n_covid}.",
         "",
         "## Templates",
