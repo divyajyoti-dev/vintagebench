@@ -1,0 +1,17 @@
+# Models evaluated by `python -m vintagebench.run`. Fields map to ModelSpec (SPEC §5).
+# Verify current model IDs and prices in provider docs before adding entries.
+#
+# Example entries (prices in USD per million tokens):
+#
+# - provider: openai            # default OpenAI base URL
+#   model_id: <openai-model-id>
+#   price_in: 0.00              # USD per 1M input tokens
+#   price_out: 0.00             # USD per 1M output tokens
+#   native_tools: true
+#
+# - provider: together          # base_url https://api.together.xyz/v1
+#   model_id: <together-model-id>
+#   price_in: 0.00              # USD per 1M input tokens
+#   price_out: 0.00             # USD per 1M output tokens
+#   native_tools: false         # false -> plain-text JSON tool protocol
+[]

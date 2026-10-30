@@ -1,0 +1,10 @@
+pandas
+pyarrow
+requests
+fredapi
+openai
+pyyaml
+
+[dev]
+pytest
+ruff
