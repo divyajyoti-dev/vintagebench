@@ -52,6 +52,14 @@ containing such a month (2020 Q1, Q2) plus the rebound quarter 2020 Q3. Such
 controls are trivially decided by the collapse. The window is the
 target period plus the template's ``lookback_months`` (e.g. 3 for the payroll
 3-month average, 12 for weakest-of-12 and PCE YoY). Flips there stay eligible.
+
+Non-trivial controls (applied in :func:`select_pilot`): for each candidate the
+notes record its distance from the threshold in units of the template's
+materiality margin, in both vintages. A non-UNRATE control is never selected if
+that distance exceeds the template's ``control_cap`` in BOTH vintages (it is
+obvious from the era alone). Caps: 10 margins for INDPRO (0.5% MoM), PCEPI
+(0.5pp), GDPC1 shrink (0.5% QoQ) and GDPC1 growth (2pp annualized); 40 margins
+(40k jobs) for both PAYEMS templates. UNRATE controls and all flips are exempt.
 """
 
 from __future__ import annotations
@@ -59,6 +67,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import random
+import re
 import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -233,6 +242,12 @@ def payrolls_weakest_margin(snapshot: pd.Series, month: pd.Timestamp) -> float |
     return None if changes is None else abs(changes[-1] - min(changes[:-1]))
 
 
+def prior_11_min_change(snapshot: pd.Series, month: pd.Timestamp) -> float | None:
+    """PAYEMS: the minimum one-month change over the 11 months before ``month``."""
+    changes = monthly_changes(snapshot, month, 12)
+    return None if changes is None else min(changes[:-1])
+
+
 def is_material(margin: float | None, minimum: float) -> bool:
     """True iff ``margin`` is known and >= ``minimum`` (within EPS)."""
     return margin is not None and margin >= minimum - EPS
@@ -360,6 +375,11 @@ class Template:
     min_margin: float = 0.0
     materiality: str = "none"
     lookback_months: int = 1  # how far before the target the answer reads data
+    # Optional second quantity reported in notes (e.g. the weakest-12m comparison).
+    metric2: Callable[[pd.Series, pd.Timestamp], float | None] | None = None
+    metric2_name: str = ""
+    # Non-trivial control cap, in margin units (None: no cap).
+    control_cap: float | None = None
 
 
 def fell_vs_prior_month_template(label: str, key: str = "mom-fall") -> Template:
@@ -372,12 +392,13 @@ def fell_vs_prior_month_template(label: str, key: str = "mom-fall") -> Template:
             f"level in {_month(t)} lower than in {_month(_shift(t, -1))}?"
         ),
         gold=fell_vs_prior_month,
-        metric=lambda s, t: change(s, t),
-        metric_name="one-month change",
+        metric=lambda s, t: pct_change(s, t),
+        metric_name="one-month % change",
         definition="yes iff level(t) < level(t-1 month); a tie is no.",
         margin=mom_pct_margin,
         min_margin=PCT_MARGIN,
         materiality="|100 * (level(t) / level(t-1 month) - 1)| >= 0.05",
+        control_cap=10.0,
     )
 
 
@@ -387,9 +408,9 @@ def _payrolls_3m_template(threshold_k: int) -> Template:
         months_per_period=1,
         question=lambda t: (
             "Was average monthly payroll growth over the 3 months ending "
-            f"{_month(t)} above {threshold_k}k, i.e. was the average monthly change "
-            f"in total nonfarm payrolls (PAYEMS) from {_month(_shift(t, -2))} through "
-            f"{_month(t)} above {threshold_k},000 jobs?"
+            f"{_month(t)} above {threshold_k}k, i.e. is (level({_month(t)}) - "
+            f"level({_month(_shift(t, -3))})) / 3 above {threshold_k}, with total nonfarm "
+            "payrolls (PAYEMS) in thousands of jobs?"
         ),
         gold=lambda s, t: payrolls_3m_avg_above(s, t, threshold_k),
         metric=avg_change_3m,
@@ -402,6 +423,7 @@ def _payrolls_3m_template(threshold_k: int) -> Template:
         min_margin=PAYROLL_MARGIN_K,
         materiality=f"|3-month average - {threshold_k}| >= 1 (thousand)",
         lookback_months=3,
+        control_cap=40.0,
     )
 
 
@@ -415,8 +437,8 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
                 f"{_quarter(t)} lower than in {_quarter(_shift(t, -3))}?"
             ),
             gold=real_gdp_shrank,
-            metric=lambda s, t: change(s, t, months=3),
-            metric_name="quarter-over-quarter change (billions of chained dollars)",
+            metric=lambda s, t: pct_change(s, t, months=3),
+            metric_name="quarter-over-quarter % change (non-annualized)",
             definition="yes iff level(q) < level(q-1 quarter); a tie is no.",
             margin=gdp_margin,
             min_margin=PCT_MARGIN,
@@ -425,6 +447,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
                 "than half the 0.1 publication unit)"
             ),
             lookback_months=3,
+            control_cap=10.0,
         ),
         Template(
             key="growth-above-2",
@@ -449,6 +472,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
                 "equivalent of the 0.05 non-annualized GDP margin)"
             ),
             lookback_months=3,
+            control_cap=10.0,
         ),
     ),
     "PAYEMS": (
@@ -457,12 +481,16 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             months_per_period=1,
             question=lambda t: (
                 f"Was {_month(t)} the weakest of the 12 months ending in {_month(t)} "
-                f"for payroll growth, i.e. was the monthly change in total nonfarm payrolls "
-                f"(PAYEMS) in {_month(t)} lower than in each of the 11 months before it?"
+                f"for payroll growth, i.e. is change({_month(t)}) lower than each of "
+                f"change({_month(_shift(t, -11))}) through change({_month(_shift(t, -1))}), "
+                "where change(month) = level(month) - level(previous month), with total "
+                "nonfarm payrolls (PAYEMS) in thousands of jobs?"
             ),
             gold=payrolls_weakest_in_12m,
             metric=lambda s, t: change(s, t),
             metric_name="one-month change (thousands)",
+            metric2=prior_11_min_change,
+            metric2_name="minimum one-month change of the prior 11 months (thousands)",
             definition=(
                 "yes iff change(t) is strictly lower than each of change(t-1) .. "
                 "change(t-11), where change(m) = level(m) - level(m-1); any tie is no."
@@ -471,6 +499,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             min_margin=PAYROLL_MARGIN_K,
             materiality="|change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand)",
             lookback_months=12,
+            control_cap=40.0,
         ),
         _payrolls_3m_template(100),
         _payrolls_3m_template(150),
@@ -482,8 +511,9 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             months_per_period=1,
             question=lambda t: (
                 f"Is PCE inflation (year over year) above 2.5% for {_month(t)}, i.e. "
-                f"is the 12-month percent change in the PCE price index "
-                f"(PCEPI) from {_month(_shift(t, -12))} to {_month(t)} above 2.5%?"
+                f"is the 12-month percent change in the PCE price index (PCEPI) from "
+                f"{_month(_shift(t, -12))} to {_month(t)}, 100 * (level({_month(t)}) / "
+                f"level({_month(_shift(t, -12))}) - 1), above 2.5?"
             ),
             gold=lambda s, t: pce_yoy_above(s, t, 2.5),
             metric=yoy_pct,
@@ -493,6 +523,7 @@ TEMPLATES: dict[str, tuple[Template, ...]] = {
             min_margin=PCT_MARGIN,
             materiality="|12-month % change - 2.5| >= 0.05 (percentage points)",
             lookback_months=12,
+            control_cap=10.0,
         ),
     ),
     "UNRATE": (
@@ -610,6 +641,14 @@ def _make_task(
         f"{template.metric_name}: as-of {_fmt(template.metric(s_as_of, t))}, "
         f"revised {_fmt(template.metric(s_rev, t))}."
     )
+    if template.metric2 is not None:
+        notes += (
+            f" {template.metric2_name}: as-of {_fmt(template.metric2(s_as_of, t))}, "
+            f"revised {_fmt(template.metric2(s_rev, t))}."
+        )
+    if template.margin is not None and template.min_margin > 0:
+        d = [template.margin(s, t) / template.min_margin for s in (s_as_of, s_rev)]  # type: ignore[operator]
+        notes += f" {DISTANCE_LABEL}: as-of {d[0]:.4f}, revised {d[1]:.4f}."
     return Task(
         id=_task_id(series_id, template, t),
         series_id=series_id,
@@ -675,6 +714,36 @@ def covid_window_overlap(task: Task) -> bool:
     return any(COVID_MONTHS[0] <= d <= COVID_MONTHS[1] for d in window)
 
 
+DISTANCE_LABEL = "Distance from threshold in margin units"
+_DISTANCE_RE = re.compile(re.escape(DISTANCE_LABEL) + r": as-of ([0-9.]+), revised ([0-9.]+)\.")
+
+
+def threshold_distances(task: Task) -> tuple[float, float] | None:
+    """(as-of, revised) distance from the threshold in margin units, from ``notes``."""
+    m = _DISTANCE_RE.search(task.notes)
+    return None if m is None else (float(m.group(1)), float(m.group(2)))
+
+
+def trivial_control(task: Task) -> bool:
+    """True iff ``task`` is a non-UNRATE control that is far from the line in BOTH
+    vintages: distance > the template's ``control_cap`` (margin units) in each.
+
+    Flips, UNRATE controls, and tasks without a cap or recorded distance are never
+    trivial.
+    """
+    if task.flips or task.series_id == CONTROL_SERIES:
+        return False
+    tp = template_for(task)
+    dist = threshold_distances(task)
+    if tp is None or tp.control_cap is None or dist is None:
+        return False
+    return min(dist) > tp.control_cap
+
+
+def _eligible_control(task: Task) -> bool:
+    return not covid_window_overlap(task) and not trivial_control(task)
+
+
 def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Task]:
     """Select a seeded, balanced pilot set (~half flips, spread across series/years).
 
@@ -687,7 +756,8 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
     - other controls: the rest, split so controls overall are ~half Yes.
 
     Controls whose window overlaps the COVID collapse (:func:`covid_window_overlap`)
-    are never selected; flips there stay eligible.
+    and non-UNRATE controls far from the line in both vintages
+    (:func:`trivial_control`) are never selected; flips are unaffected.
 
     Strata are filled round-robin, one task at a time; each pick is greedy: the
     candidate whose series is least used among already chosen tasks with the same
@@ -707,7 +777,7 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
             t
             for t in pool
             if t.flips == flips
-            and (flips or not covid_window_overlap(t))
+            and (flips or _eligible_control(t))
             and bool(t.gold_as_of) == yes
             and (t.series_id == CONTROL_SERIES) == unrate
             and not (flips and unrate)
@@ -761,9 +831,7 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
         deficit = sum(q for _, _, q in sts) - sum(got[name] for name, _, _ in sts)
         picker.take([t for _, sp, _ in sts for t in sp], deficit)
     others = [
-        t
-        for t in pool
-        if t.series_id != CONTROL_SERIES and (t.flips or not covid_window_overlap(t))
+        t for t in pool if t.series_id != CONTROL_SERIES and (t.flips or _eligible_control(t))
     ]
     picker.take(others, n - len(picker.chosen))
 
@@ -867,6 +935,7 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         c[1] += t.flips
     tpl = {f"{s.lower()}-{tp.key}": tp for s, tps in TEMPLATES.items() for tp in tps}
     n_covid = sum(not t.flips and covid_window_overlap(t) for t in candidates)
+    trivial = Counter(_template_key(t) for t in candidates if trivial_control(t))
     n_flips = sum(t.flips for t in pilot)
     n_unrate = sum(t.series_id == CONTROL_SERIES for t in pilot)
     lines = [
@@ -903,6 +972,18 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "collapse. Flips in these windows stay eligible.",
         f"Candidate controls excluded by this rule: {n_covid}.",
         "",
+        "## Non-trivial controls",
+        "",
+        "Each candidate's notes record its distance from the threshold in units of the",
+        "template's materiality margin, in both vintages. A non-UNRATE control is not",
+        "selected if that distance exceeds the template's cap (column below) in BOTH",
+        "vintages: it is obvious from the era alone. UNRATE controls (the low-revision",
+        "series) and flips are exempt. Caps: 10 margins for INDPRO (0.5% MoM), PCEPI",
+        "(0.5pp), GDPC1 shrink (0.5% QoQ) and GDPC1 growth (2pp annualized); 40 margins",
+        "(40k jobs) for the PAYEMS templates.",
+        f"Candidate controls excluded by this rule: {sum(trivial.values())} "
+        "(some are also COVID-excluded).",
+        "",
         "## Templates",
         "",
         "Comparisons are strict; exact ties count as No. Candidates with any needed",
@@ -912,13 +993,18 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "publication unit, or stricter for GDPC1), so no gold answer hinges on a",
         "difference below published precision. Counts are after this filter.",
         "",
-        "| template | definition | materiality margin (both vintages) | candidates | flips |",
-        "|---|---|---|---|---|",
+        "| template | definition | materiality margin (both vintages) | control cap "
+        "(margins) | candidates | flips | trivial controls excluded |",
+        "|---|---|---|---|---|---|---|",
     ]
     for (series, key), (total, flips) in sorted(counts.items()):
         tp = tpl.get(key)
-        definition, margin = (tp.definition, tp.materiality) if tp else ("", "")
-        lines.append(f"| {key} ({series}) | {definition} | {margin} | {total} | {flips} |")
+        definition, margin = (_cell(tp.definition), _cell(tp.materiality)) if tp else ("", "")
+        cap = "none" if tp is None or tp.control_cap is None else f"{tp.control_cap:g}"
+        lines.append(
+            f"| {key} ({series}) | {definition} | {margin} | {cap} | {total} | {flips} "
+            f"| {trivial[key]} |"
+        )
     lines += _balance_lines(pilot)
     lines += [
         "",
@@ -929,10 +1015,15 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
     ]
     for t in pilot:
         lines.append(
-            f"| {t.id} | {t.question} | {_yes_no(t.gold_as_of)} | {_yes_no(t.gold_revised)} | "
-            f"{'yes' if t.flips else 'no'} |"
+            f"| {t.id} | {_cell(t.question)} | {_yes_no(t.gold_as_of)} | "
+            f"{_yes_no(t.gold_revised)} | {'yes' if t.flips else 'no'} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def _cell(text: str) -> str:
+    """Escape pipes (e.g. absolute-value bars) so they do not split a table cell."""
+    return text.replace("|", "\\|")
 
 
 def _share(k: int, n: int) -> str:
