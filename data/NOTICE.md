@@ -1,8 +1,8 @@
 # Data notice
 
 The files in `data/vintages/` hold real-time (vintage) observations of five US economic
-series. Data values from these files also appear in `tasks/` (in task questions and
-notes), in `runs/` (in tool responses inside the cached model prompts and in
+series. Quantities derived from these files appear in `tasks/` (growth rates and
+margin distances in task notes; questions contain only round thresholds), in `runs/` (in tool responses inside the cached model prompts and in
 `values_used`), and in `results/PILOT.md`.
 
 The MIT License in [LICENSE](../LICENSE) covers the VintageBench code only. It does not
