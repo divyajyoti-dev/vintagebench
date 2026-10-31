@@ -8,6 +8,7 @@ import subprocess
 import sys
 import warnings
 from collections import Counter
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 
@@ -754,7 +755,8 @@ def test_extend_pilot_keeps_existing_and_balances() -> None:
     assert all(by_id[t.id] is t for t in base)  # the 20 are kept, same objects
     _check_balance_60(ext)
     _check_rules(ext)
-    assert ext == sorted(ext, key=lambda t: t.id)
+    assert ext[:20] == base  # base first, in its given order
+    assert ext[20:] == sorted(ext[20:], key=lambda t: t.id)  # then new ones by id
     assert len({t.series_id for t in ext}) == 5
     assert len({t.id[-7:-3] for t in ext}) == 10  # every year 2016-2025
 
@@ -783,7 +785,8 @@ def test_extend_pilot_deterministic_and_seeded() -> None:
     base = tasks.select_pilot(pool, n=20, seed=0)
     a = tasks.extend_pilot(base, pool, n_total=60, seed=0)
     assert a == tasks.extend_pilot(base, pool, n_total=60, seed=0)
-    assert a == tasks.extend_pilot(list(reversed(base)), list(reversed(pool)), 60, seed=0)
+    rev = tasks.extend_pilot(list(reversed(base)), list(reversed(pool)), 60, seed=0)
+    assert rev[:20] == list(reversed(base)) and rev[20:] == a[20:]  # base order kept
     assert a == tasks.extend_pilot(base, pool + pool, n_total=60, seed=0)  # duplicates dropped
     b = tasks.extend_pilot(base, pool, n_total=60, seed=1)
     assert {t.id for t in a} != {t.id for t in b}
@@ -886,6 +889,8 @@ def test_cli_extend_refuses_overwriting_base(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("toy")
 def test_cli_extend_toy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks, "SERIES", ("TOY",))
+    # TOY revisions are 2 months after as-of: lift the gap rule to exercise the CLI.
+    monkeypatch.setattr(tasks, "MIN_REVISION_GAP_DAYS", 0)
     cands = tasks.build_candidates(["TOY"], TOY_ROOT)
     base = sorted(cands, key=lambda t: t.id)[:2]
     tasks.save_tasks(tmp_path / "base.jsonl", base)
@@ -895,14 +900,26 @@ def test_cli_extend_toy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     with pytest.warns(UserWarning, match="extend_pilot: strata short"):  # 1 flip, no UNRATE
         tasks.main(argv, root=TOY_ROOT)
     ext = tasks.load_tasks(out)
-    assert len(ext) == 6 and all(t in ext for t in base)
+    assert len(ext) == 6 and ext[:2] == base
     base_lines = (tmp_path / "base.jsonl").read_text().splitlines()
-    assert set(base_lines) <= set(out.read_text().splitlines())  # byte-identical lines
+    assert out.read_text().splitlines()[:2] == base_lines  # byte-identical, first
     text = readme.read_text()
-    assert "# VintageBench tasks: 6-task set" in text
+    assert "# VintageBench tasks: 6-task set" in text and "## Clusters" in text
+    clusters = tasks.task_clusters(ext)
     for t in ext:
         tag = "pilot20" if t in base else "new"
-        assert f"| {'yes' if t.flips else 'no'} | {tag} |" in text and f"| {t.id} |" in text
+        row = f"| {'yes' if t.flips else 'no'} | {tag} | {clusters[t.id]} |"
+        assert row in text and f"| {t.id} |" in text
+
+
+@pytest.mark.usefixtures("toy")
+def test_cli_extend_toy_gap_rule_blocks_short_revisions(tmp_path: Path) -> None:
+    cands = tasks.build_candidates(["TOY"], TOY_ROOT)
+    assert not any(tasks.revision_gap_ok(c) for c in cands)  # 2021-01-15 -> 2021-03-15
+    base = sorted(cands, key=lambda t: t.id)[:2]
+    with pytest.warns(UserWarning, match="got 2/6 tasks"):
+        ext = tasks.extend_pilot(base, cands, n_total=6, seed=0)
+    assert ext == base  # base kept even though it fails the gap rule
 
 
 # --- the committed task files (real vintage data, no network) --------------------
@@ -939,10 +956,14 @@ def test_pilot60_file_reproduces_and_holds_rules(
     assert regen == p60
     tasks.save_tasks(tmp_path / "p60.jsonl", regen)
     assert (tmp_path / "p60.jsonl").read_bytes() == (repo / "pilot60.jsonl").read_bytes()
-    # The 20 are kept exactly: their JSON lines appear verbatim.
+    # The 20 are kept exactly and first, in pilot.jsonl order; then new ones by id.
     lines60 = (repo / "pilot60.jsonl").read_text().splitlines()
-    assert set((repo / "pilot.jsonl").read_text().splitlines()) <= set(lines60)
+    assert lines60[:20] == (repo / "pilot.jsonl").read_text().splitlines()
     assert len(lines60) == 60
+    new = p60[20:]
+    assert [t.id for t in new] == sorted(t.id for t in new)
+    assert all(tasks.revision_gap_ok(t) for t in new)  # gap rule, new tasks only
+    assert _avoidable_overlaps(p60, real_candidates, {t.id for t in pilot}) == []
     _check_balance_60(p60)
     # Gold, flips, materiality: every task equals a programmatically built candidate.
     by_id = {c.id: c for c in real_candidates}
@@ -968,3 +989,161 @@ def test_readme60_matches_render(real_candidates: list[Task]) -> None:
     )
     assert (repo / "README60.md").read_text() == text
     assert tasks.EXTEND_COMMAND in text
+
+
+# --- revision gap, computation windows, overlap avoidance, clusters ---------------
+
+
+def _avoidable_overlaps(chosen: list[Task], candidates: list[Task], base: set[str]) -> list[str]:
+    """New tasks that overlap another chosen task although a free candidate in the
+    same stratum overlaps none of the other chosen tasks (so greedy would have
+    preferred it: the chosen set only grows during selection)."""
+    ids = {t.id for t in chosen}
+    taken = {(t.series_id, t.id[-7:]) for t in chosen}
+    free = [
+        u
+        for u in candidates
+        if u.id not in ids
+        and (u.series_id, u.id[-7:]) not in taken
+        and tasks._selectable(u)
+        and tasks.revision_gap_ok(u)
+        and 2016 <= int(u.id[-7:-3]) <= 2025
+    ]
+    bad = []
+    for t in chosen:
+        rest = [o for o in chosen if o.id != t.id]
+        if t.id in base or not any(tasks.windows_overlap(t, o) for o in rest):
+            continue
+        name = tasks._stratum_name(t)
+        alts = [u for u in free if tasks._stratum_name(u) == name]
+        if any(not any(tasks.windows_overlap(u, o) for o in rest) for u in alts):
+            bad.append(t.id)
+    return bad
+
+
+@pytest.mark.parametrize(
+    ("as_of", "revised", "ok"),
+    [
+        ("2020-01-10", "2021-01-09", True),  # 365 days (2020 is a leap year)
+        ("2021-01-10", "2022-01-10", True),  # 365 days
+        ("2021-01-10", "2022-01-09", False),  # 364 days
+        ("2025-06-06", "2026-02-06", False),  # "else the latest vintage" fallback
+    ],
+)
+def test_revision_gap_ok(as_of: str, revised: str, ok: bool) -> None:
+    t = dataclasses.replace(
+        _fake("INDPRO", "mom-fall", "2020-01", flips=True), as_of_date=as_of, revision_date=revised
+    )
+    assert tasks.revision_gap_ok(t) is ok
+
+
+def test_extend_pilot_skips_short_gap_new_tasks() -> None:
+    pool = _pool()
+    base = tasks.select_pilot(pool, n=20, seed=0)
+    short = [dataclasses.replace(t, revision_date=t.as_of_date) for t in pool]
+    with pytest.warns(UserWarning, match="got 20/60 tasks"):
+        ext = tasks.extend_pilot(base, short, n_total=60, seed=0)
+    assert ext == base
+
+
+@pytest.mark.parametrize(
+    ("task_id", "window"),
+    [
+        ("indpro-mom-fall-2019-03", ["2019-02", "2019-03"]),
+        ("unrate-mom-rise-2019-03", ["2019-02", "2019-03"]),
+        ("gdpc1-qoq-shrink-2019-04", ["2019-01", "2019-04"]),
+        ("gdpc1-growth-above-2-2019-01", ["2018-10", "2019-01"]),
+        ("payems-avg3m-above-100k-2025-04", ["2025-01", "2025-02", "2025-03", "2025-04"]),
+        ("payems-weakest-12m-2022-10", [f"{y}-{m:02d}" for y, m in
+                                        [(2021, 10), (2021, 11), (2021, 12)]
+                                        + [(2022, k) for k in range(1, 11)]]),
+        ("pcepi-yoy-above-2.5-2024-01", ["2023-01", *[f"2023-{m:02d}" for m in range(2, 13)],
+                                         "2024-01"]),
+    ],
+)  # fmt: skip
+def test_computation_window(task_id: str, window: list[str]) -> None:
+    series = task_id.split("-")[0].upper()
+    task = _fake(series, task_id[len(series) + 1 : -8], task_id[-7:], flips=False)
+    assert [f"{d:%Y-%m}" for d in tasks.computation_window(task)] == window
+
+
+def test_windows_overlap() -> None:
+    a = _fake("INDPRO", "mom-fall", "2019-02", flips=True)
+    b = _fake("INDPRO", "mom-fall", "2019-03", flips=True)  # shares February
+    c = _fake("INDPRO", "mom-fall", "2019-04", flips=True)  # Mar-Apr: disjoint from a
+    p1 = _fake("PAYEMS", "weakest-12m", "2022-09", flips=True)
+    p2 = _fake("PAYEMS", "avg3m-above-100k", "2023-09", flips=True)  # Jun-Sep 2023
+    p3 = _fake("PAYEMS", "avg3m-above-100k", "2022-12", flips=True)  # Sep-Dec 2022
+    u = _fake("UNRATE", "mom-rise", "2019-03", flips=False)
+    assert tasks.windows_overlap(a, b) and tasks.windows_overlap(b, c)
+    assert not tasks.windows_overlap(a, c)
+    assert not tasks.windows_overlap(b, u)  # other series never overlap
+    assert tasks.windows_overlap(p1, p3) and not tasks.windows_overlap(p1, p2)  # cross-template
+    g1 = _fake("GDPC1", "qoq-shrink", "2019-01", flips=True)
+    g2 = _fake("GDPC1", "growth-above-2", "2019-04", flips=True)  # shares 2019 Q1
+    g3 = _fake("GDPC1", "growth-above-2", "2019-07", flips=True)
+    assert tasks.windows_overlap(g1, g2) and not tasks.windows_overlap(g1, g3)
+
+
+def test_task_clusters() -> None:
+    rows = [
+        _fake("INDPRO", "mom-fall", "2019-02", flips=True),
+        _fake("INDPRO", "mom-fall", "2019-04", flips=True),
+        _fake("INDPRO", "mom-fall", "2019-03", flips=False),  # links 02 and 04 (a chain)
+        _fake("INDPRO", "mom-fall", "2019-06", flips=True),  # alone
+        _fake("UNRATE", "mom-rise", "2019-03", flips=False),  # other series: alone
+    ]
+    cl = tasks.task_clusters(rows)
+    assert cl == {
+        "indpro-mom-fall-2019-02": "INDPRO:2019-01..2019-04",
+        "indpro-mom-fall-2019-03": "INDPRO:2019-01..2019-04",
+        "indpro-mom-fall-2019-04": "INDPRO:2019-01..2019-04",
+        "indpro-mom-fall-2019-06": "INDPRO:2019-05..2019-06",
+        "unrate-mom-rise-2019-03": "UNRATE:2019-02..2019-03",
+    }
+    assert tasks.task_clusters(list(reversed(rows))) == cl  # order-independent
+    assert tasks.task_clusters([]) == {}
+
+
+def _indpro_pool(flip_months: Iterable[int] | None = None) -> list[Task]:
+    """INDPRO mom-fall for every month 2016-2025 (flips where i % 4 == 0 unless
+    ``flip_months`` is given) plus UNRATE controls; controls carry distances."""
+    out = []
+    months = [f"{y}-{m:02d}" for y in range(2016, 2026) for m in range(1, 13)]
+    flip_set = set(range(0, len(months), 4)) if flip_months is None else set(flip_months)
+    for i, ym in enumerate(months):
+        flips = i in flip_set
+        t = _fake(
+            "INDPRO", "mom-fall", ym, flips=flips, yes=(i // 4) % 2 == 0 if flips else i % 2 == 0
+        )
+        out.append(t if flips else _with_dist(t, 2.0, 3.0))
+        out.append(_fake("UNRATE", "mom-rise", ym, flips=False, yes=i % 2 == 0))
+    return out
+
+
+def test_extend_pilot_avoids_overlap_when_possible() -> None:
+    pool = _indpro_pool()
+    base = [t for t in pool if t.id == "indpro-mom-fall-2016-01"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ext = tasks.extend_pilot(base, pool, n_total=40, seed=0)
+    assert len(ext) == 40
+    cl = tasks.task_clusters(ext)
+    assert len(set(cl.values())) == 40  # no two chosen tasks overlap
+    assert _avoidable_overlaps(ext, pool, {t.id for t in base}) == []
+    # Without the penalty (select_pilot) the same pool does produce overlaps.
+    plain = tasks.select_pilot(pool, n=40, seed=0)
+    assert len(set(tasks.task_clusters(plain).values())) < 40
+
+
+def test_extend_pilot_allows_overlap_only_when_forced() -> None:
+    # Only 4 flips exist, in two adjacent pairs: filling 4 flip slots forces overlaps.
+    pool = _indpro_pool(flip_months=[24, 25, 60, 61])  # 2018-01/02, 2021-01/02
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the flip strata are short of 10
+        ext = tasks.extend_pilot([], pool, n_total=20, seed=0)
+    flips = [t for t in ext if t.flips]
+    assert sorted(t.id[-7:] for t in flips) == ["2018-01", "2018-02", "2021-01", "2021-02"]
+    cl = tasks.task_clusters(ext)
+    assert cl["indpro-mom-fall-2018-01"] == cl["indpro-mom-fall-2018-02"]
+    assert _avoidable_overlaps(ext, pool, set()) == []

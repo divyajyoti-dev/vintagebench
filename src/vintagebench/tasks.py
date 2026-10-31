@@ -28,7 +28,10 @@ tasks/pilot.jsonl and tasks/README.md from data/vintages/). The 60-task set
 (the 20 pilot tasks kept exactly, plus 40 from :func:`extend_pilot`) is
 regenerated with ``python -m vintagebench.tasks --extend-from tasks/pilot.jsonl
 --n 60 --out tasks/pilot60.jsonl --readme-out tasks/README60.md --seed 0``; see
-``--help``.
+``--help``. The file lists the 20 pilot tasks first (pilot.jsonl order), then the
+new ones by id. New tasks additionally need a revision gap of at least 365 days and
+avoid same-series overlap of :func:`computation_window` where possible; overlap
+clusters are given by :func:`task_clusters`.
 
 Only target observations dated 2016-01-01 .. 2025-12-31 are used (SPEC §3).
 All comparisons are strict; exact ties (within ``EPS``) count as "no".
@@ -735,14 +738,67 @@ def covid_window_overlap(task: Task) -> bool:
     2020-06; quarterly: 2020 Q1 or Q2 (they contain such a month) or the rebound
     quarter 2020 Q3. Unknown templates use the target alone.
     """
+    window = computation_window(task)
+    tp = template_for(task)
+    if tp is not None and tp.months_per_period == 3:
+        return any(d in COVID_QUARTERS for d in window)
+    return any(COVID_MONTHS[0] <= d <= COVID_MONTHS[1] for d in window)
+
+
+def computation_window(task: Task) -> tuple[date, ...]:
+    """Observation periods the task's answer depends on, oldest first.
+
+    The target period and every period up to the template's ``lookback_months``
+    before it, in steps of the period length: 2 months for month-over-month
+    questions, 2 quarters for GDP, 4 months for the payroll 3-month average and 13
+    months for weakest-of-12 and PCE YoY (the whole span, not only the two levels
+    read, since every month in it feeds the deciding change). Unknown templates use
+    the target alone.
+    """
     tp = template_for(task)
     lookback = tp.lookback_months if tp else 0
     step = tp.months_per_period if tp else 1
     t = pd.Timestamp(_period_key(task) + "-01")
-    window = [_shift(t, -k).date() for k in range(0, lookback + 1, step)]
-    if step == 3:
-        return any(d in COVID_QUARTERS for d in window)
-    return any(COVID_MONTHS[0] <= d <= COVID_MONTHS[1] for d in window)
+    return tuple(_shift(t, -k).date() for k in range(lookback - lookback % step, -1, -step))
+
+
+def windows_overlap(a: Task, b: Task) -> bool:
+    """True iff ``a`` and ``b`` are in the same series and their windows intersect."""
+    return a.series_id == b.series_id and bool(
+        set(computation_window(a)) & set(computation_window(b))
+    )
+
+
+def task_clusters(rows: Iterable[Task]) -> dict[str, str]:
+    """Cluster label per task id: connected components of the overlap graph.
+
+    Two tasks are linked iff :func:`windows_overlap` (same series, intersecting
+    windows). The label is ``<SERIES>:<first>..<last>``, the YYYY-MM span of the
+    union of the component's windows; components in one series have disjoint
+    spans, so labels are unique. A task overlapping nothing is its own cluster.
+    """
+    items = sorted({t.id: t for t in rows}.values(), key=lambda t: t.id)
+    parent = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, a in enumerate(items):
+        for j in range(i + 1, len(items)):
+            if windows_overlap(a, items[j]):
+                parent[find(i)] = find(j)
+    members: dict[int, list[Task]] = {}
+    for i, t in enumerate(items):
+        members.setdefault(find(i), []).append(t)
+    out: dict[str, str] = {}
+    for group in members.values():
+        days = [d for t in group for d in computation_window(t)]
+        label = f"{group[0].series_id}:{min(days):%Y-%m}..{max(days):%Y-%m}"
+        out.update({t.id: label for t in group})
+    return out
 
 
 def threshold_distances(task: Task, root: Path | None = None) -> tuple[float, float]:
@@ -860,9 +916,19 @@ def extend_pilot(
     exclusion and non-trivial cap for controls, no UNRATE flips, 2016–2025 targets,
     one task per (series, target period) including the existing tasks, no duplicate
     ids) and the same greedy spread picker, whose usage counters start from the
-    existing tasks. Shortfalls fall back to the sibling stratum, then to any
-    non-UNRATE candidate, and are reported in a warning with the actual cells.
-    Output is sorted by id.
+    existing tasks. Two extra rules apply to NEW tasks only:
+
+    - revision gap: revision_date - as_of_date >= 365 days (:func:`revision_gap_ok`);
+    - independence: the picker's first criterion is the number of already chosen
+      tasks (existing or new) whose :func:`computation_window` overlaps the
+      candidate's in the same series, so an overlapping task is picked only when no
+      non-overlapping candidate is left in the pool being drawn from (the stratum,
+      then its sibling fallback, then any non-UNRATE candidate).
+
+    Shortfalls fall back to the sibling stratum, then to any non-UNRATE candidate,
+    and are reported in a warning with the actual cells. Output: the existing tasks
+    first, in their given order, then the new tasks sorted by id (so the first
+    ``len(existing)`` rows are the base set).
     """
     keep = list({t.id: t for t in existing}.values())
     if len(keep) != len(existing):
@@ -873,10 +939,11 @@ def extend_pilot(
     totals = _strata_quotas(n_total, n_unr)
     have = Counter(_stratum_name(t) for t in keep)
     quotas = {name: max(q - have[name], 0) for name, q in totals.items()}
-    picker = _Picker()
+    picker = _Picker(avoid_overlap=True)
     for t in keep:
         picker.add(t)
-    _fill(_shuffled_pool(candidates, seed), quotas, picker, n_total)
+    pool = [t for t in _shuffled_pool(candidates, seed) if revision_gap_ok(t)]
+    _fill(pool, quotas, picker, n_total)
     chosen = picker.chosen[:n_total]
     cells = Counter(_stratum_name(t) for t in chosen)
     short = [f"{name} {cells[name]}/{q}" for name, q in totals.items() if cells[name] < q]
@@ -887,7 +954,21 @@ def extend_pilot(
             f"got {len(chosen)}/{n_total} tasks; actual cells: {actual}.",
             stacklevel=2,
         )
-    return sorted(chosen, key=lambda t: t.id)
+    added = sorted(chosen[len(keep) :], key=lambda t: t.id)
+    return keep + added
+
+
+MIN_REVISION_GAP_DAYS = 365  # extension tasks only (see extend_pilot)
+
+
+def revision_gap_ok(task: Task) -> bool:
+    """True iff revision_date - as_of_date >= :data:`MIN_REVISION_GAP_DAYS` days.
+
+    Excludes tasks that used the "else the latest vintage" fallback of the date
+    rule, whose revised answer could change when newer vintages are fetched.
+    """
+    gap = date.fromisoformat(task.revision_date) - date.fromisoformat(task.as_of_date)
+    return gap.days >= MIN_REVISION_GAP_DAYS
 
 
 STRATA = (  # (name, flips, as-of Yes, UNRATE), in fill order
@@ -968,7 +1049,9 @@ def _fill(pool: list[Task], quotas: dict[str, int], picker: _Picker, n: int) -> 
 class _Picker:
     """Greedy spread-maximizing picker with shared usage counters."""
 
-    def __init__(self) -> None:
+    def __init__(self, avoid_overlap: bool = False) -> None:
+        self.avoid_overlap = avoid_overlap  # extend_pilot only; select_pilot unchanged
+        self.windows: dict[str, list[frozenset[date]]] = {}
         self.chosen: list[Task] = []
         self.ids: set[str] = set()
         self.series: Counter[str] = Counter()
@@ -986,6 +1069,12 @@ class _Picker:
         self.templates[_template_key(t)] += 1
         self.years[_period_key(t)[:4]] += 1
         self.targets.add((t.series_id, _period_key(t)))
+        self.windows.setdefault(t.series_id, []).append(frozenset(computation_window(t)))
+
+    def overlaps(self, t: Task) -> int:
+        """Number of chosen tasks in ``t``'s series whose window intersects ``t``'s."""
+        w = set(computation_window(t))
+        return sum(bool(w & other) for other in self.windows.get(t.series_id, ()))
 
     def take(self, pool: list[Task], k: int) -> int:
         """Pick up to ``k`` tasks from ``pool``; return how many were picked."""
@@ -1003,8 +1092,9 @@ class _Picker:
             taken += 1
         return taken
 
-    def _score(self, t: Task) -> tuple[int, int, int, int]:
+    def _score(self, t: Task) -> tuple[int, ...]:
         return (
+            *((self.overlaps(t),) if self.avoid_overlap else ()),
             self.series_group[(t.series_id, t.flips)],
             self.series[t.series_id],
             self.templates[_template_key(t)],
@@ -1146,12 +1236,15 @@ def _template_table(candidates: list[Task], trivial: Counter[str]) -> list[str]:
     return lines
 
 
-def _task_table(rows: list[Task], new_ids: set[str] | None = None) -> list[str]:
-    """The task table; with ``new_ids``, an extra column marks the added tasks."""
+def _task_table(
+    rows: list[Task], new_ids: set[str] | None = None, clusters: dict[str, str] | None = None
+) -> list[str]:
+    """The task table; with ``new_ids``, extra columns mark added tasks and clusters."""
     extra = new_ids is not None
     lines = [
-        "| id | question | as-of answer | revised answer | flips |" + (" set |" if extra else ""),
-        "|---|---|---|---|---|" + ("---|" if extra else ""),
+        "| id | question | as-of answer | revised answer | flips |"
+        + (" set | cluster |" if extra else ""),
+        "|---|---|---|---|---|" + ("---|---|" if extra else ""),
     ]
     for t in rows:
         line = (
@@ -1159,7 +1252,8 @@ def _task_table(rows: list[Task], new_ids: set[str] | None = None) -> list[str]:
             f"{_yes_no(t.gold_revised)} | {'yes' if t.flips else 'no'} |"
         )
         if new_ids is not None:
-            line += f" {'new' if t.id in new_ids else 'pilot20'} |"
+            label = (clusters or {}).get(t.id, "")
+            line += f" {'new' if t.id in new_ids else 'pilot20'} | {label} |"
         lines.append(line)
     return lines
 
@@ -1197,20 +1291,59 @@ def _balance_lines(pilot: list[Task], title: str = "Answer balance (pilot)") -> 
     ]
 
 
-def eligible_pool_counts(candidates: list[Task]) -> dict[str, tuple[int, int]]:
-    """Per template key: (selectable flips, selectable controls) after every rule.
+def eligible_pool_counts(candidates: list[Task]) -> dict[str, tuple[int, int, int, int]]:
+    """Per template key: selectable (flips, controls, flips with gap, controls with gap).
 
-    Selectable = what :func:`select_pilot` / :func:`extend_pilot` may draw from:
-    targets in 2016–2025, non-UNRATE flips, controls passing the COVID exclusion
-    and the non-trivial cap (materiality is already applied by build_candidates).
-    One task per (series, period) is enforced at pick time, so it is not netted here.
+    Selectable = what :func:`select_pilot` may draw from: targets in 2016–2025,
+    non-UNRATE flips, controls passing the COVID exclusion and the non-trivial cap
+    (materiality is already applied by build_candidates). "With gap" adds the
+    :func:`revision_gap_ok` rule that :func:`extend_pilot` applies to new tasks.
+    One task per (series, period) and overlap avoidance act at pick time and are
+    not netted here.
     """
     out: dict[str, list[int]] = {}
     for t in _shuffled_pool(candidates, 0):
-        row = out.setdefault(_template_key(t), [0, 0])
+        row = out.setdefault(_template_key(t), [0, 0, 0, 0])
         if _selectable(t):
-            row[0 if t.flips else 1] += 1
-    return {k: (v[0], v[1]) for k, v in sorted(out.items())}
+            k = 0 if t.flips else 1
+            row[k] += 1
+            row[k + 2] += revision_gap_ok(t)
+    return {k: (v[0], v[1], v[2], v[3]) for k, v in sorted(out.items())}
+
+
+def _exhausted_flip_templates(candidates: list[Task], chosen: list[Task]) -> list[str]:
+    """Templates with eligible flips, none of which is left for an extension."""
+    ids = {t.id for t in chosen}
+    pool = [t for t in _shuffled_pool(candidates, 0) if t.flips and _selectable(t)]
+    keys = sorted({_template_key(t) for t in pool})
+    return [
+        k
+        for k in keys
+        if not any(_template_key(t) == k and t.id not in ids and revision_gap_ok(t) for t in pool)
+    ]
+
+
+EASY_CAP_FACTOR, EASY_MARGINS = 2.0, 20.0  # README60 disclosure of easy-side controls
+
+
+def easy_side_controls(
+    rows: list[Task], root: Path | None = None
+) -> list[tuple[Task, float, float, float]]:
+    """Non-UNRATE controls whose AS-OF distance is > 2x the cap or > 20 margins.
+
+    The cap excludes a control only if min(as-of, revised) exceeds it, so a
+    control can be far from the line in one vintage. Returns (task, as-of
+    distance, revised distance, cap) for each, in input order.
+    """
+    out = []
+    for t in rows:
+        tp = template_for(t)
+        if t.flips or t.series_id == CONTROL_SERIES or tp is None or tp.control_cap is None:
+            continue
+        a, r = threshold_distances(t, root)
+        if a > EASY_CAP_FACTOR * tp.control_cap or a > EASY_MARGINS:
+            out.append((t, a, r, tp.control_cap))
+    return out
 
 
 def _display_path(path: Path) -> str:
@@ -1225,6 +1358,7 @@ def render_extended_readme(
     seed: int,
     out_path: Path,
     base_path: Path,
+    root: Path | None = None,
 ) -> str:
     """Markdown for an extended set (e.g. tasks/README60.md).
 
@@ -1237,6 +1371,8 @@ def render_extended_readme(
     trivial = Counter(_template_key(t) for t in candidates if trivial_control(t))
     n_flips = sum(t.flips for t in tasks_out)
     n_unrate = sum(t.series_id == CONTROL_SERIES for t in tasks_out)
+    clusters = task_clusters(tasks_out)
+    new_flips = [t for t in tasks_out if t.id in new_ids and t.flips]
     lines = [
         f"# VintageBench tasks: {n}-task set",
         "",
@@ -1266,6 +1402,23 @@ def render_extended_readme(
         "picker, whose usage counters start from the existing tasks. Quotas are those",
         f"of a balanced {n}-task set, minus what the existing tasks already fill.",
         "",
+        "Two extra rules apply to the new tasks only (the base tasks are unchanged):",
+        "",
+        f"- Revision gap: revision_date - as_of_date >= {MIN_REVISION_GAP_DAYS} days. This",
+        '  excludes the date rule\'s "else the latest vintage" fallback, whose revised',
+        "  answer could change when newer vintages are fetched.",
+        "- Independence: a task's computation window is its target period plus the",
+        "  template's lookback (2 months for month-over-month, 2 quarters for GDP, 4",
+        "  months for the payroll 3-month average, 13 months for weakest-of-12 and PCE",
+        "  YoY). Two tasks in the same series overlap if their windows intersect. The",
+        "  picker's first criterion is the number of already chosen tasks a candidate",
+        "  overlaps, so an overlapping task is added only when no non-overlapping",
+        "  candidate is left in the stratum (or its fallback) being filled.",
+        "",
+        f"Row order: the {len(existing)} tasks of `{base_name}` first, in their original",
+        f"order, then the {len(new_ids)} new tasks sorted by id. The first {len(existing)} rows",
+        f"of `{out_name}` are therefore exactly the base set (e.g. `--limit {len(existing)}`).",
+        "",
         "## Templates",
         "",
         "Counts are candidates after the materiality filter (as in tasks/README.md).",
@@ -1280,12 +1433,17 @@ def render_extended_readme(
         "non-trivial cap for controls; UNRATE flips are never drawn). One task per",
         "(series, target period) is enforced at pick time and is not netted here.",
         "",
-        "| template | eligible flips | eligible controls | in this set |",
-        "|---|---|---|---|",
+        'Columns "with gap" also apply the 365-day revision gap required of new tasks.',
+        "",
+        "| template | eligible flips | eligible controls | flips with gap | controls with gap "
+        "| flips in this set | controls in this set |",
+        "|---|---|---|---|---|---|---|",
     ]
-    used = Counter(_template_key(t) for t in tasks_out)
-    for key, (f, c) in eligible_pool_counts(candidates).items():
-        lines.append(f"| {key} | {f} | {c} | {used[key]} |")
+    used = Counter((_template_key(t), t.flips) for t in tasks_out)
+    for key, (f, c, fg, cg) in eligible_pool_counts(candidates).items():
+        lines.append(
+            f"| {key} | {f} | {c} | {fg} | {cg} | {used[(key, True)]} | {used[(key, False)]} |"
+        )
     lines += _balance_lines(tasks_out, title=f"Answer balance ({n}-task set)")
     cells = Counter(_stratum_name(t) for t in tasks_out)
     lines += [
@@ -1306,9 +1464,74 @@ def render_extended_readme(
     years = Counter(_period_key(t)[:4] for t in tasks_out)
     lines += ["", "| year | tasks |", "|---|---|"]
     lines += [f"| {y} | {years[y]} |" for y in sorted(years)]
+    exhausted = _exhausted_flip_templates(candidates, tasks_out)
+    by_series = Counter(t.series_id for t in new_flips)
+    top2 = by_series.most_common(2)
+    late = sum(_period_key(t)[:4] in ("2024", "2025") for t in new_flips)
+    lines += [
+        "",
+        "The year and series spread is limited by the eligible flip pool, which is",
+        f"exhausted for {', '.join(exhausted) or 'no template'}, so most new flips are "
+        + " and ".join(f"{s} ({k})" for s, k in top2)
+        + f" (of {len(new_flips)} new flips) and {late} of them target 2024–2025.",
+    ]
+    lines += _cluster_lines(tasks_out, clusters)
+    lines += _easy_control_lines(tasks_out, root)
     lines += ["", f"## Tasks ({n})", ""]
-    lines += _task_table(tasks_out, new_ids)
+    lines += _task_table(tasks_out, new_ids, clusters)
     return "\n".join(lines) + "\n"
+
+
+def _cluster_lines(rows: list[Task], clusters: dict[str, str]) -> list[str]:
+    groups: dict[str, list[Task]] = {}
+    for t in rows:
+        groups.setdefault(clusters[t.id], []).append(t)
+    n_flip = len({clusters[t.id] for t in rows if t.flips})
+    n_ctrl = len({clusters[t.id] for t in rows if not t.flips})
+    multi = sorted((k, v) for k, v in groups.items() if len(v) > 1)
+    lines = [
+        "",
+        "## Clusters",
+        "",
+        "A cluster is a connected component of the overlap graph within one series",
+        "(`task_clusters`); a task overlapping no other is its own cluster. Labels are",
+        "`<SERIES>:<first month>..<last month>` of the union of the members' windows.",
+        "Use clusters, not tasks, as the independent unit when aggregating results.",
+        "",
+        f"- Distinct clusters: {n_flip} among the {sum(t.flips for t in rows)} flips, "
+        f"{n_ctrl} among the {sum(not t.flips for t in rows)} controls "
+        f"({len(groups)} in all).",
+        f"- Multi-task clusters ({len(multi)}):",
+        "",
+        "| cluster | tasks | members (flips marked *) |",
+        "|---|---|---|",
+    ]
+    for label, members in multi:
+        names = ", ".join(t.id + ("*" if t.flips else "") for t in sorted(members, key=_by_id))
+        lines.append(f"| {label} | {len(members)} | {names} |")
+    return lines
+
+
+def _by_id(t: Task) -> str:
+    return t.id
+
+
+def _easy_control_lines(rows: list[Task], root: Path | None) -> list[str]:
+    easy = easy_side_controls(rows, root)
+    lines = [
+        "",
+        "## Controls easy on one side",
+        "",
+        "The non-trivial cap excludes a control only if min(as-of, revised) distance",
+        "exceeds the cap, so a kept control can still be far from the threshold as of",
+        f"its first release. Controls whose as-of distance is more than {EASY_CAP_FACTOR:g}x",
+        f"the cap or more than {EASY_MARGINS:g} margins ({len(easy)}):",
+        "",
+        "| id | as-of distance (margins) | revised distance (margins) | cap |",
+        "|---|---|---|---|",
+    ]
+    lines += [f"| {t.id} | {a:.1f} | {r:.1f} | {c:g} |" for t, a, r, c in easy]
+    return lines
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1370,7 +1593,7 @@ def main(argv: list[str] | None = None, *, root: Path = data.DATA_DIR) -> None:
         _check_existing(existing, candidates)
         chosen = extend_pilot(existing, candidates, n_total=n, seed=args.seed)
         text = render_extended_readme(
-            candidates, chosen, existing, args.seed, Path(out), Path(args.extend_from)
+            candidates, chosen, existing, args.seed, Path(out), Path(args.extend_from), root
         )
     else:
         chosen = select_pilot(candidates, n=n, seed=args.seed)
