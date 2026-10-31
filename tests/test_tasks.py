@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import subprocess
+import sys
 import warnings
 from collections import Counter
 from datetime import date
@@ -389,7 +391,10 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
 def test_main_writes_pilot_and_readme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks, "SERIES", ("TOY",))
     with pytest.warns(UserWarning):  # TOY has only one flip and no UNRATE
-        tasks.main(root=TOY_ROOT, out_dir=tmp_path, seed=0)
+        tasks.main(
+            ["--out", str(tmp_path / "pilot.jsonl"), "--readme-out", str(tmp_path / "README.md")],
+            root=TOY_ROOT,
+        )
     pilot = tasks.load_tasks(tmp_path / "pilot.jsonl")
     readme = (tmp_path / "README.md").read_text()
     assert any(t.flips for t in pilot)
@@ -713,3 +718,253 @@ def test_select_pilot_skips_trivial_controls() -> None:
 
 def test_readme_escapes_pipes_in_cells() -> None:
     assert tasks._cell("|a - b| >= 1") == "\\|a - b\\| >= 1"
+
+
+# --- extend_pilot (60-task set) -------------------------------------------------
+
+
+def _check_rules(chosen: list[Task]) -> None:
+    """Every selection rule that does not need vintage data."""
+    assert len({t.id for t in chosen}) == len(chosen)  # no duplicate ids
+    assert len({(t.series_id, t.id[-7:]) for t in chosen}) == len(chosen)  # one per target
+    assert all(2016 <= int(t.id[-7:-3]) <= 2025 for t in chosen)
+    assert not any(t.flips and t.series_id == "UNRATE" for t in chosen)
+    controls = [t for t in chosen if not t.flips]
+    assert not any(tasks.covid_window_overlap(t) for t in controls)
+    assert not any(tasks.trivial_control(t) for t in controls)
+
+
+def _check_balance_60(chosen: list[Task]) -> None:
+    assert len(chosen) == 60
+    cells = Counter((t.flips, t.gold_as_of) for t in chosen)
+    assert cells == {(True, True): 15, (True, False): 15, (False, True): 15, (False, False): 15}
+    unrate = Counter(t.gold_as_of for t in chosen if t.series_id == "UNRATE")
+    assert unrate == {True: 3, False: 3}
+    assert sum(t.gold_as_of for t in chosen) == 30
+    assert sum(t.gold_revised for t in chosen) == 30  # follows from the 4 cells
+
+
+def test_extend_pilot_keeps_existing_and_balances() -> None:
+    pool = _pool()
+    base = tasks.select_pilot(pool, n=20, seed=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a well-stocked pool meets every quota
+        ext = tasks.extend_pilot(base, pool, n_total=60, seed=0)
+    by_id = {t.id: t for t in ext}
+    assert all(by_id[t.id] is t for t in base)  # the 20 are kept, same objects
+    _check_balance_60(ext)
+    _check_rules(ext)
+    assert ext == sorted(ext, key=lambda t: t.id)
+    assert len({t.series_id for t in ext}) == 5
+    assert len({t.id[-7:-3] for t in ext}) == 10  # every year 2016-2025
+
+
+def test_extend_pilot_keeps_existing_not_in_candidates() -> None:
+    pool = _pool()
+    odd = _fake("INDPRO", "f", "2016-02", flips=True, yes=True)  # not a candidate
+    ext = tasks.extend_pilot([odd], pool, n_total=10, seed=0)
+    assert odd in ext and len(ext) == 10
+    # Its (series, period) is taken: no other INDPRO 2016-02 task was added.
+    assert [t for t in ext if (t.series_id, t.id[-7:]) == ("INDPRO", "2016-02")] == [odd]
+
+
+def test_extend_pilot_quota_net_of_existing() -> None:
+    pool = _pool()
+    # 6 existing flip/as-of Yes: the 60-set target is 15, so 9 more are added.
+    base = [t for t in pool if t.flips and t.gold_as_of and t.series_id != "UNRATE"][:6]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ext = tasks.extend_pilot(base, pool, n_total=60, seed=0)
+    _check_balance_60(ext)
+
+
+def test_extend_pilot_deterministic_and_seeded() -> None:
+    pool = _pool()
+    base = tasks.select_pilot(pool, n=20, seed=0)
+    a = tasks.extend_pilot(base, pool, n_total=60, seed=0)
+    assert a == tasks.extend_pilot(base, pool, n_total=60, seed=0)
+    assert a == tasks.extend_pilot(list(reversed(base)), list(reversed(pool)), 60, seed=0)
+    assert a == tasks.extend_pilot(base, pool + pool, n_total=60, seed=0)  # duplicates dropped
+    b = tasks.extend_pilot(base, pool, n_total=60, seed=1)
+    assert {t.id for t in a} != {t.id for t in b}
+    assert {t.id for t in base} <= {t.id for t in b}
+
+
+def test_extend_pilot_short_stratum_warns_with_cells() -> None:
+    pool = _pool()
+    base = tasks.select_pilot(pool, n=20, seed=0)
+    no_new_flip_yes = [t for t in pool if not (t.flips and t.gold_as_of)]
+    with pytest.warns(UserWarning, match=r"flip/as-of Yes 5/15.*actual cells: flip/as-of Yes 5"):
+        ext = tasks.extend_pilot(base, no_new_flip_yes, n_total=60, seed=0)
+    assert len(ext) == 60
+    assert sum(t.flips for t in ext) == 30  # sibling stratum keeps flips at 30
+    _check_rules(ext)
+
+
+def test_extend_pilot_rejects_bad_input() -> None:
+    pool = _pool()
+    base = tasks.select_pilot(pool, n=20, seed=0)
+    with pytest.raises(ValueError, match="n_total"):
+        tasks.extend_pilot(base, pool, n_total=10)
+    with pytest.raises(ValueError, match="duplicate"):
+        tasks.extend_pilot(base + base[:1], pool, n_total=60)
+
+
+def test_extend_pilot_skips_covid_and_trivial_controls() -> None:
+    pool = []
+    months = [f"{y}-{m:02d}" for y in range(2018, 2023) for m in range(1, 13)]
+    for i, ym in enumerate(months):
+        far = i % 3 == 0
+        for s, key in [("INDPRO", "mom-fall"), ("PCEPI", "yoy-above-2.5"),
+                       ("PAYEMS", "avg3m-above-150k"), ("UNRATE", "mom-rise")]:  # fmt: skip
+            d = (100.0, 100.0) if far else (2.0, 3.0)
+            pool.append(_with_dist(_fake(s, key, ym, flips=False, yes=(i // 2) % 2 == 0), *d))
+        pool.append(_fake("GDPC1", "growth-above-2", ym, flips=True, yes=i % 2 == 0))
+        pool.append(_fake("UNRATE", "mom-rise", ym, flips=True, yes=True))  # never drawn
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        base = tasks.select_pilot(pool, n=20, seed=0)
+        ext = tasks.extend_pilot(base, pool, n_total=60, seed=0)
+    _check_rules(ext)
+    assert any(not t.flips and tasks.covid_window_overlap(t) for t in pool)
+    assert any(tasks.trivial_control(t) for t in pool)
+
+
+@pytest.mark.parametrize(("n", "expected"), [(20, 2), (40, 4), (60, 6), (4, 2), (2, 1)])
+def test_default_n_unrate(n: int, expected: int) -> None:
+    assert tasks.default_n_unrate(n) == expected
+
+
+def test_strata_quotas_60() -> None:
+    q = tasks._strata_quotas(60, 6)
+    assert list(q.values()) == [15, 15, 3, 3, 12, 12]
+    assert tasks._strata_quotas(20, 2) == dict(zip(q, [5, 5, 1, 1, 4, 4], strict=True))
+
+
+# --- CLI ----------------------------------------------------------------------
+
+
+def test_cli_help_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(tasks, "TASKS_DIR", tmp_path)
+
+    def boom(*a: object, **k: object) -> None:
+        raise AssertionError("--help must not build candidates")
+
+    monkeypatch.setattr(tasks, "build_candidates", boom)
+    with pytest.raises(SystemExit) as exc:
+        tasks.main(["--help"])
+    assert exc.value.code == 0
+    assert "--extend-from" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_help_subprocess_leaves_repo_files_untouched() -> None:
+    files = [tasks.TASKS_DIR / n for n in ("pilot.jsonl", "README.md")]
+    files = [f for f in files if f.exists()]
+    before = {f: (f.stat().st_mtime_ns, f.read_bytes()) for f in files}
+    res = subprocess.run(
+        [sys.executable, "-m", "vintagebench.tasks", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert res.returncode == 0 and "usage:" in res.stdout
+    assert {f: (f.stat().st_mtime_ns, f.read_bytes()) for f in files} == before
+
+
+def test_cli_extend_refuses_overwriting_base(tmp_path: Path) -> None:
+    base = tmp_path / "pilot.jsonl"
+    base.write_text("")
+    with pytest.raises(SystemExit) as exc:
+        tasks.main(["--extend-from", str(base), "--out", str(base)], root=TOY_ROOT)
+    assert exc.value.code == 2
+    assert base.read_text() == ""
+
+
+@pytest.mark.usefixtures("toy")
+def test_cli_extend_toy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tasks, "SERIES", ("TOY",))
+    cands = tasks.build_candidates(["TOY"], TOY_ROOT)
+    base = sorted(cands, key=lambda t: t.id)[:2]
+    tasks.save_tasks(tmp_path / "base.jsonl", base)
+    out, readme = tmp_path / "ext.jsonl", tmp_path / "R.md"
+    argv = ["--extend-from", str(tmp_path / "base.jsonl"), "--n", "6", "--out", str(out),
+            "--readme-out", str(readme)]  # fmt: skip
+    with pytest.warns(UserWarning, match="extend_pilot: strata short"):  # 1 flip, no UNRATE
+        tasks.main(argv, root=TOY_ROOT)
+    ext = tasks.load_tasks(out)
+    assert len(ext) == 6 and all(t in ext for t in base)
+    base_lines = (tmp_path / "base.jsonl").read_text().splitlines()
+    assert set(base_lines) <= set(out.read_text().splitlines())  # byte-identical lines
+    text = readme.read_text()
+    assert "# VintageBench tasks: 6-task set" in text
+    for t in ext:
+        tag = "pilot20" if t in base else "new"
+        assert f"| {'yes' if t.flips else 'no'} | {tag} |" in text and f"| {t.id} |" in text
+
+
+# --- the committed task files (real vintage data, no network) --------------------
+
+HAVE_DATA = (data.DATA_DIR / "GDPC1.parquet").exists()
+
+
+@pytest.fixture(scope="module")
+def real_candidates() -> list[Task]:
+    return tasks.build_candidates(tasks.SERIES, data.DATA_DIR)
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="no vintage data")
+def test_default_cli_reproduces_pilot_and_readme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_tasks = tasks.TASKS_DIR
+    monkeypatch.setattr(tasks, "TASKS_DIR", tmp_path)
+    tasks.main([])
+    for name in ("pilot.jsonl", "README.md"):
+        assert (tmp_path / name).read_bytes() == (repo_tasks / name).read_bytes()
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="no vintage data")
+def test_pilot60_file_reproduces_and_holds_rules(
+    tmp_path: Path, real_candidates: list[Task]
+) -> None:
+    repo = tasks.TASKS_DIR
+    pilot = tasks.load_tasks(repo / "pilot.jsonl")
+    p60 = tasks.load_tasks(repo / "pilot60.jsonl")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # every stratum is filled on the real data
+        regen = tasks.extend_pilot(pilot, real_candidates, n_total=60, seed=0)
+    assert regen == p60
+    tasks.save_tasks(tmp_path / "p60.jsonl", regen)
+    assert (tmp_path / "p60.jsonl").read_bytes() == (repo / "pilot60.jsonl").read_bytes()
+    # The 20 are kept exactly: their JSON lines appear verbatim.
+    lines60 = (repo / "pilot60.jsonl").read_text().splitlines()
+    assert set((repo / "pilot.jsonl").read_text().splitlines()) <= set(lines60)
+    assert len(lines60) == 60
+    _check_balance_60(p60)
+    # Gold, flips, materiality: every task equals a programmatically built candidate.
+    by_id = {c.id: c for c in real_candidates}
+    assert all(by_id.get(t.id) == t for t in p60)
+    for t in p60:  # templates and materiality margins in both vintages
+        tp = tasks.template_for(t)
+        assert tp is not None and t.question == tp.question(T(t.id[-7:] + "-01"))
+        if tp.margin is not None:
+            assert min(tasks.threshold_distances(t)) >= 1.0 - 1e-9
+    _check_rules(p60)
+    years = Counter(t.id[-7:-3] for t in p60)
+    assert set(years) == {str(y) for y in range(2016, 2026)}
+    assert {t.series_id for t in p60} == set(tasks.SERIES)
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="no vintage data")
+def test_readme60_matches_render(real_candidates: list[Task]) -> None:
+    repo = tasks.TASKS_DIR
+    pilot = tasks.load_tasks(repo / "pilot.jsonl")
+    p60 = tasks.load_tasks(repo / "pilot60.jsonl")
+    text = tasks.render_extended_readme(
+        real_candidates, p60, pilot, 0, repo / "pilot60.jsonl", repo / "pilot.jsonl"
+    )
+    assert (repo / "README60.md").read_text() == text
+    assert tasks.EXTEND_COMMAND in text

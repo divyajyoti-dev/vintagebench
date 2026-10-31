@@ -24,7 +24,11 @@ INDPRO 2021-05-28) cannot affect a gold answer. Only the resulting booleans are
 compared across vintages (``flips``).
 
 Regenerate the pilot with ``python -m vintagebench.tasks`` (writes
-tasks/pilot.jsonl and tasks/README.md from data/vintages/).
+tasks/pilot.jsonl and tasks/README.md from data/vintages/). The 60-task set
+(the 20 pilot tasks kept exactly, plus 40 from :func:`extend_pilot`) is
+regenerated with ``python -m vintagebench.tasks --extend-from tasks/pilot.jsonl
+--n 60 --out tasks/pilot60.jsonl --readme-out tasks/README60.md --seed 0``; see
+``--help``.
 
 Only target observations dated 2016-01-01 .. 2025-12-31 are used (SPEC §3).
 All comparisons are strict; exact ties (within ``EPS``) count as "no".
@@ -67,6 +71,7 @@ about 1pp annualized); 40 margins
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import math
@@ -813,76 +818,12 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
     other answer), then from any non-UNRATE candidate; every shortfall is reported
     in a warning. Output is sorted by id.
     """
-    rng = random.Random(seed)
-    unique = {t.id: t for t in sorted(candidates, key=lambda t: t.id)}
-    pool = [t for t in unique.values() if FIRST_YEAR <= int(_period_key(t)[:4]) <= LAST_YEAR]
-    rng.shuffle(pool)
-
-    def stratum(flips: bool, yes: bool, unrate: bool) -> list[Task]:
-        return [
-            t
-            for t in pool
-            if t.flips == flips
-            and (flips or _eligible_control(t))
-            and bool(t.gold_as_of) == yes
-            and (t.series_id == CONTROL_SERIES) == unrate
-            and not (flips and unrate)
-        ]
-
-    n_flip = n // 2
-    n_ctrl = n - n_flip
-    n_unr = min(N_CONTROL_SERIES, n_ctrl)
-    n_other = n_ctrl - n_unr  # >= 0
-    ctrl_yes = min(max(n_ctrl - n_ctrl // 2 - n_unr // 2, 0), n_other)
-    ctrl_no = max(n_other - ctrl_yes, 0)
-    groups = [  # (name, [(stratum name, pool, quota), ...])
-        (
-            "flips",
-            [
-                ("flip/as-of Yes", stratum(True, True, False), n_flip - n_flip // 2),
-                ("flip/as-of No", stratum(True, False, False), n_flip // 2),
-            ],
-        ),
-        (
-            f"{CONTROL_SERIES} controls",
-            [
-                (f"{CONTROL_SERIES} control/as-of Yes", stratum(False, True, True), n_unr // 2),
-                (
-                    f"{CONTROL_SERIES} control/as-of No",
-                    stratum(False, False, True),
-                    n_unr - n_unr // 2,
-                ),
-            ],
-        ),
-        (
-            "controls",
-            [
-                ("control/as-of Yes", stratum(False, True, False), ctrl_yes),
-                ("control/as-of No", stratum(False, False, False), ctrl_no),
-            ],
-        ),
-    ]
-    strata = [st for _, sts in groups for st in sts]
-
+    pool = _shuffled_pool(candidates, seed)
+    quotas = _strata_quotas(n, min(N_CONTROL_SERIES, n - n // 2))
     picker = _Picker()
-    got = {name: 0 for name, _, _ in strata}
-    active = True
-    while active:  # round-robin over strata
-        active = False
-        for name, spool, quota in strata:
-            if got[name] < quota and picker.take(spool, 1):
-                got[name] += 1
-                active = True
-    for _, sts in groups:  # sibling fallback, keeps the group's size
-        deficit = sum(q for _, _, q in sts) - sum(got[name] for name, _, _ in sts)
-        picker.take([t for _, sp, _ in sts for t in sp], deficit)
-    others = [
-        t for t in pool if t.series_id != CONTROL_SERIES and (t.flips or _eligible_control(t))
-    ]
-    picker.take(others, n - len(picker.chosen))
-
+    got = _fill(pool, quotas, picker, n)
     chosen = picker.chosen[:n]  # quotas sum to n; the slice is only a guard
-    short = [f"{name} {got[name]}/{quota}" for name, _, quota in strata if got[name] < quota]
+    short = [f"{name} {got[name]}/{quota}" for name, quota in quotas.items() if got[name] < quota]
     if short or len(chosen) < n:
         n_flips = sum(t.flips for t in chosen)
         n_yes = sum(bool(t.gold_as_of) for t in chosen)
@@ -892,6 +833,136 @@ def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Tas
             stacklevel=2,
         )
     return sorted(chosen, key=lambda t: t.id)
+
+
+def default_n_unrate(n_total: int) -> int:
+    """UNRATE controls for a set of ``n_total``: 2 per 20 tasks (at least 2), e.g. 6 of 60."""
+    n_ctrl = n_total - n_total // 2
+    return min(max(N_CONTROL_SERIES, round(n_total * N_CONTROL_SERIES / PILOT_N)), n_ctrl)
+
+
+def extend_pilot(
+    existing: list[Task],
+    candidates: list[Task],
+    n_total: int = 60,
+    seed: int = 0,
+    n_unrate: int | None = None,
+) -> list[Task]:
+    """Top up ``existing`` to ``n_total`` tasks with the :func:`select_pilot` logic.
+
+    The existing tasks are kept exactly (same objects, never re-checked or
+    replaced). The strata quotas are those of a balanced set of ``n_total``: flips
+    ``n_total // 2`` split Yes/No on the as-of answer, ``n_unrate`` UNRATE controls
+    (default :func:`default_n_unrate`, i.e. 6 for 60) split Yes/No, and the other
+    controls split so controls overall are ~half Yes. Each stratum receives its
+    quota minus the existing tasks already in it. New tasks come from the seeded,
+    shuffled ``candidates`` under the same rules as :func:`select_pilot` (COVID
+    exclusion and non-trivial cap for controls, no UNRATE flips, 2016–2025 targets,
+    one task per (series, target period) including the existing tasks, no duplicate
+    ids) and the same greedy spread picker, whose usage counters start from the
+    existing tasks. Shortfalls fall back to the sibling stratum, then to any
+    non-UNRATE candidate, and are reported in a warning with the actual cells.
+    Output is sorted by id.
+    """
+    keep = list({t.id: t for t in existing}.values())
+    if len(keep) != len(existing):
+        raise ValueError("extend_pilot: duplicate ids in the existing tasks")
+    if n_total < len(keep):
+        raise ValueError(f"extend_pilot: n_total={n_total} < {len(keep)} existing tasks")
+    n_unr = default_n_unrate(n_total) if n_unrate is None else n_unrate
+    totals = _strata_quotas(n_total, n_unr)
+    have = Counter(_stratum_name(t) for t in keep)
+    quotas = {name: max(q - have[name], 0) for name, q in totals.items()}
+    picker = _Picker()
+    for t in keep:
+        picker.add(t)
+    _fill(_shuffled_pool(candidates, seed), quotas, picker, n_total)
+    chosen = picker.chosen[:n_total]
+    cells = Counter(_stratum_name(t) for t in chosen)
+    short = [f"{name} {cells[name]}/{q}" for name, q in totals.items() if cells[name] < q]
+    if short or len(chosen) < n_total:
+        actual = ", ".join(f"{name} {cells[name]}" for name in totals)
+        warnings.warn(
+            f"extend_pilot: strata short (got/wanted): {', '.join(short) or 'none'}; "
+            f"got {len(chosen)}/{n_total} tasks; actual cells: {actual}.",
+            stacklevel=2,
+        )
+    return sorted(chosen, key=lambda t: t.id)
+
+
+STRATA = (  # (name, flips, as-of Yes, UNRATE), in fill order
+    ("flip/as-of Yes", True, True, False),
+    ("flip/as-of No", True, False, False),
+    (f"{CONTROL_SERIES} control/as-of Yes", False, True, True),
+    (f"{CONTROL_SERIES} control/as-of No", False, False, True),
+    ("control/as-of Yes", False, True, False),
+    ("control/as-of No", False, False, False),
+)
+_GROUPS = ((0, 1), (2, 3), (4, 5))  # sibling strata (flips, UNRATE controls, controls)
+
+
+def _stratum_name(task: Task) -> str | None:
+    """The stratum ``task`` belongs to (None: an UNRATE flip, which no stratum takes)."""
+    for name, flips, yes, unrate in STRATA:
+        if (
+            task.flips == flips
+            and bool(task.gold_as_of) == yes
+            and (task.series_id == CONTROL_SERIES) == unrate
+        ):
+            return name
+    return None
+
+
+def _strata_quotas(n: int, n_unr: int) -> dict[str, int]:
+    """Per-stratum quotas (in :data:`STRATA` order) for a balanced set of ``n``."""
+    n_flip = n // 2
+    n_ctrl = n - n_flip
+    n_other = n_ctrl - n_unr  # >= 0
+    ctrl_yes = min(max(n_ctrl - n_ctrl // 2 - n_unr // 2, 0), n_other)
+    ctrl_no = max(n_other - ctrl_yes, 0)
+    sizes = (n_flip - n_flip // 2, n_flip // 2, n_unr // 2, n_unr - n_unr // 2, ctrl_yes, ctrl_no)
+    return {name: q for (name, *_), q in zip(STRATA, sizes, strict=True)}
+
+
+def _shuffled_pool(candidates: list[Task], seed: int) -> list[Task]:
+    """Unique ids, targets in 2016–2025, sorted by id then shuffled with ``seed``."""
+    rng = random.Random(seed)
+    unique = {t.id: t for t in sorted(candidates, key=lambda t: t.id)}
+    pool = [t for t in unique.values() if FIRST_YEAR <= int(_period_key(t)[:4]) <= LAST_YEAR]
+    rng.shuffle(pool)
+    return pool
+
+
+def _selectable(task: Task) -> bool:
+    """Flips (non-UNRATE) and eligible controls; see :func:`_eligible_control`."""
+    if task.flips:
+        return task.series_id != CONTROL_SERIES
+    return _eligible_control(task)
+
+
+def _fill(pool: list[Task], quotas: dict[str, int], picker: _Picker, n: int) -> dict[str, int]:
+    """Fill ``quotas`` from ``pool`` into ``picker`` (round-robin, then fallbacks).
+
+    Returns the number of tasks each stratum supplied in the round-robin phase.
+    """
+    selectable = [t for t in pool if _selectable(t)]
+    spools = {name: [t for t in selectable if _stratum_name(t) == name] for name in quotas}
+    got = {name: 0 for name in quotas}
+    active = True
+    while active:  # round-robin over strata
+        active = False
+        for name, quota in quotas.items():
+            if got[name] < quota and picker.take(spools[name], 1):
+                got[name] += 1
+                active = True
+    names = list(quotas)
+    for group in _GROUPS:  # sibling fallback, keeps the group's size
+        members = [names[i] for i in group]
+        deficit = sum(quotas[m] for m in members) - sum(got[m] for m in members)
+        picker.take([t for m in members for t in spools[m]], deficit)
+    others = [t for t in pool if t.series_id != CONTROL_SERIES and _selectable(t)]
+    picker.take(others, n - len(picker.chosen))
+    return got
 
 
 class _Picker:
@@ -906,6 +977,16 @@ class _Picker:
         self.years: Counter[str] = Counter()
         self.targets: set[tuple[str, str]] = set()
 
+    def add(self, t: Task) -> None:
+        """Record ``t`` as chosen and update every usage counter."""
+        self.chosen.append(t)
+        self.ids.add(t.id)
+        self.series[t.series_id] += 1
+        self.series_group[(t.series_id, t.flips)] += 1
+        self.templates[_template_key(t)] += 1
+        self.years[_period_key(t)[:4]] += 1
+        self.targets.add((t.series_id, _period_key(t)))
+
     def take(self, pool: list[Task], k: int) -> int:
         """Pick up to ``k`` tasks from ``pool``; return how many were picked."""
         taken = 0
@@ -918,13 +999,7 @@ class _Picker:
             if not avail:
                 break
             _, best = min(avail, key=lambda it: (*self._score(it[1]), it[0]))
-            self.chosen.append(best)
-            self.ids.add(best.id)
-            self.series[best.series_id] += 1
-            self.series_group[(best.series_id, best.flips)] += 1
-            self.templates[_template_key(best)] += 1
-            self.years[_period_key(best)[:4]] += 1
-            self.targets.add((best.series_id, _period_key(best)))
+            self.add(best)
             taken += 1
         return taken
 
@@ -961,9 +1036,15 @@ def load_tasks(path: Path) -> list[Task]:
 # ---------------------------------------------------------------------------
 
 SERIES = ("GDPC1", "PAYEMS", "INDPRO", "PCEPI", "UNRATE")
-TASKS_DIR: Path = Path(__file__).resolve().parents[2] / "tasks"
+REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+TASKS_DIR: Path = REPO_ROOT / "tasks"
 PILOT_SEED = 0
 PILOT_N = 20
+EXTEND_N = 60  # default --n when --extend-from is given
+EXTEND_COMMAND = (
+    "python -m vintagebench.tasks --extend-from tasks/pilot.jsonl --n 60 "
+    "--out tasks/pilot60.jsonl --readme-out tasks/README60.md --seed 0"
+)
 
 
 def _yes_no(answer: Answer) -> str:
@@ -974,12 +1055,6 @@ def _yes_no(answer: Answer) -> str:
 
 def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
     """Markdown for tasks/README.md, generated from the candidates and the pilot."""
-    counts: dict[tuple[str, str], list[int]] = {}
-    for t in candidates:
-        c = counts.setdefault((t.series_id, _template_key(t)), [0, 0])
-        c[0] += 1
-        c[1] += t.flips
-    tpl = {f"{s.lower()}-{tp.key}": tp for s, tps in TEMPLATES.items() for tp in tps}
     n_covid = sum(not t.flips and covid_window_overlap(t) for t in candidates)
     trivial = Counter(_template_key(t) for t in candidates if trivial_control(t))
     n_flips = sum(t.flips for t in pilot)
@@ -1040,6 +1115,22 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
         "publication unit, or stricter for GDPC1), so no gold answer hinges on a",
         "difference below published precision. Counts are after this filter.",
         "",
+    ]
+    lines += _template_table(candidates, trivial)
+    lines += _balance_lines(pilot)
+    lines += ["", "## Pilot tasks", ""]
+    lines += _task_table(pilot)
+    return "\n".join(lines) + "\n"
+
+
+def _template_table(candidates: list[Task], trivial: Counter[str]) -> list[str]:
+    counts: dict[tuple[str, str], list[int]] = {}
+    for t in candidates:
+        c = counts.setdefault((t.series_id, _template_key(t)), [0, 0])
+        c[0] += 1
+        c[1] += t.flips
+    tpl = {f"{s.lower()}-{tp.key}": tp for s, tps in TEMPLATES.items() for tp in tps}
+    lines = [
         "| template | definition | materiality margin (both vintages) | control cap "
         "(margins) | candidates | flips | trivial controls excluded |",
         "|---|---|---|---|---|---|---|",
@@ -1052,20 +1143,25 @@ def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
             f"| {key} ({series}) | {definition} | {margin} | {cap} | {total} | {flips} "
             f"| {trivial[key]} |"
         )
-    lines += _balance_lines(pilot)
-    lines += [
-        "",
-        "## Pilot tasks",
-        "",
-        "| id | question | as-of answer | revised answer | flips |",
-        "|---|---|---|---|---|",
+    return lines
+
+
+def _task_table(rows: list[Task], new_ids: set[str] | None = None) -> list[str]:
+    """The task table; with ``new_ids``, an extra column marks the added tasks."""
+    extra = new_ids is not None
+    lines = [
+        "| id | question | as-of answer | revised answer | flips |" + (" set |" if extra else ""),
+        "|---|---|---|---|---|" + ("---|" if extra else ""),
     ]
-    for t in pilot:
-        lines.append(
+    for t in rows:
+        line = (
             f"| {t.id} | {_cell(t.question)} | {_yes_no(t.gold_as_of)} | "
             f"{_yes_no(t.gold_revised)} | {'yes' if t.flips else 'no'} |"
         )
-    return "\n".join(lines) + "\n"
+        if new_ids is not None:
+            line += f" {'new' if t.id in new_ids else 'pilot20'} |"
+        lines.append(line)
+    return lines
 
 
 def _cell(text: str) -> str:
@@ -1077,7 +1173,7 @@ def _share(k: int, n: int) -> str:
     return f"{k}/{n} ({100 * k / n:.0f}%)" if n else "0/0"
 
 
-def _balance_lines(pilot: list[Task]) -> list[str]:
+def _balance_lines(pilot: list[Task], title: str = "Answer balance (pilot)") -> list[str]:
     n = len(pilot)
     yes_as_of = sum(bool(t.gold_as_of) for t in pilot)
     yes_rev = sum(bool(t.gold_revised) for t in pilot)
@@ -1087,7 +1183,7 @@ def _balance_lines(pilot: list[Task]) -> list[str]:
 
     return [
         "",
-        "## Answer balance (pilot)",
+        f"## {title}",
         "",
         "| | as-of Yes | as-of No |",
         "|---|---|---|",
@@ -1101,13 +1197,200 @@ def _balance_lines(pilot: list[Task]) -> list[str]:
     ]
 
 
-def main(root: Path = data.DATA_DIR, out_dir: Path = TASKS_DIR, seed: int = PILOT_SEED) -> None:
-    """Regenerate tasks/pilot.jsonl and tasks/README.md from the vintage data."""
+def eligible_pool_counts(candidates: list[Task]) -> dict[str, tuple[int, int]]:
+    """Per template key: (selectable flips, selectable controls) after every rule.
+
+    Selectable = what :func:`select_pilot` / :func:`extend_pilot` may draw from:
+    targets in 2016–2025, non-UNRATE flips, controls passing the COVID exclusion
+    and the non-trivial cap (materiality is already applied by build_candidates).
+    One task per (series, period) is enforced at pick time, so it is not netted here.
+    """
+    out: dict[str, list[int]] = {}
+    for t in _shuffled_pool(candidates, 0):
+        row = out.setdefault(_template_key(t), [0, 0])
+        if _selectable(t):
+            row[0 if t.flips else 1] += 1
+    return {k: (v[0], v[1]) for k, v in sorted(out.items())}
+
+
+def _display_path(path: Path) -> str:
+    path = Path(path).resolve()
+    return str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else path.name
+
+
+def render_extended_readme(
+    candidates: list[Task],
+    tasks_out: list[Task],
+    existing: list[Task],
+    seed: int,
+    out_path: Path,
+    base_path: Path,
+) -> str:
+    """Markdown for an extended set (e.g. tasks/README60.md).
+
+    Same tables as :func:`render_readme` (per-template counts, answer balance, all
+    tasks) plus the eligible pool, the strata cells and the series/year spread.
+    """
+    n = len(tasks_out)
+    new_ids = {t.id for t in tasks_out} - {t.id for t in existing}
+    out_name, base_name = _display_path(out_path), _display_path(base_path)
+    trivial = Counter(_template_key(t) for t in candidates if trivial_control(t))
+    n_flips = sum(t.flips for t in tasks_out)
+    n_unrate = sum(t.series_id == CONTROL_SERIES for t in tasks_out)
+    lines = [
+        f"# VintageBench tasks: {n}-task set",
+        "",
+        "Generated from data/vintages/; do not edit by hand. Gold answers are computed",
+        "programmatically from two vintages (SPEC §3). Regenerate with:",
+        "",
+        "```",
+        EXTEND_COMMAND
+        if (n, seed) == (EXTEND_N, PILOT_SEED)
+        else (
+            f"python -m vintagebench.tasks --extend-from {base_name} --n {n} "
+            f"--out {out_name} --readme-out <readme> --seed {seed}"
+        ),
+        "```",
+        "",
+        "## Selection",
+        "",
+        f"`{out_name}`: {n} tasks = the {len(existing)} tasks of `{base_name}`, kept",
+        f"unchanged, plus {len(new_ids)} new ones from `extend_pilot(existing, candidates, "
+        f"n_total={n}, seed={seed})`: {n_flips} flips, {n - n_flips} controls "
+        f"({n_unrate} {CONTROL_SERIES}).",
+        "",
+        "The new tasks obey the same rules as the pilot (see tasks/README.md: date rule,",
+        "materiality margins in both vintages, COVID exclusion and non-trivial caps for",
+        "controls, no UNRATE flips, targets 2016-01 to 2025-12, one task per (series,",
+        "target period), no duplicate ids) and the same stratified, spread-maximizing",
+        "picker, whose usage counters start from the existing tasks. Quotas are those",
+        f"of a balanced {n}-task set, minus what the existing tasks already fill.",
+        "",
+        "## Templates",
+        "",
+        "Counts are candidates after the materiality filter (as in tasks/README.md).",
+        "",
+    ]
+    lines += _template_table(candidates, trivial)
+    lines += [
+        "",
+        "## Eligible pool",
+        "",
+        "Candidates the selection may draw from, after every rule (COVID exclusion and",
+        "non-trivial cap for controls; UNRATE flips are never drawn). One task per",
+        "(series, target period) is enforced at pick time and is not netted here.",
+        "",
+        "| template | eligible flips | eligible controls | in this set |",
+        "|---|---|---|---|",
+    ]
+    used = Counter(_template_key(t) for t in tasks_out)
+    for key, (f, c) in eligible_pool_counts(candidates).items():
+        lines.append(f"| {key} | {f} | {c} | {used[key]} |")
+    lines += _balance_lines(tasks_out, title=f"Answer balance ({n}-task set)")
+    cells = Counter(_stratum_name(t) for t in tasks_out)
+    lines += [
+        "",
+        "Strata (actual / target):",
+        "",
+        "| stratum | tasks | target |",
+        "|---|---|---|",
+    ]
+    targets = _strata_quotas(n, default_n_unrate(n))
+    for name, *_ in STRATA:
+        lines.append(f"| {name} | {cells[name]} | {targets[name]} |")
+    lines += ["", "## Spread", "", "| series | flips | controls | total |", "|---|---|---|---|"]
+    for sid in sorted({t.series_id for t in tasks_out}):
+        rows = [t for t in tasks_out if t.series_id == sid]
+        k = sum(t.flips for t in rows)
+        lines.append(f"| {sid} | {k} | {len(rows) - k} | {len(rows)} |")
+    years = Counter(_period_key(t)[:4] for t in tasks_out)
+    lines += ["", "| year | tasks |", "|---|---|"]
+    lines += [f"| {y} | {years[y]} |" for y in sorted(years)]
+    lines += ["", f"## Tasks ({n})", ""]
+    lines += _task_table(tasks_out, new_ids)
+    return "\n".join(lines) + "\n"
+
+
+def _parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="python -m vintagebench.tasks",
+        description=(
+            "Build candidates from data/vintages/ and write a task set plus its README. "
+            "With no options, regenerates tasks/pilot.jsonl and tasks/README.md "
+            f"(select_pilot, n={PILOT_N}, seed={PILOT_SEED})."
+        ),
+        epilog=f"Regenerate the 60-task set: {EXTEND_COMMAND}",
+    )
+    p.add_argument(
+        "--n",
+        type=int,
+        default=None,
+        help=f"number of tasks (default {PILOT_N}; {EXTEND_N} with --extend-from)",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="output JSONL (default tasks/pilot.jsonl; tasks/pilot<N>.jsonl with --extend-from)",
+    )
+    p.add_argument(
+        "--readme-out",
+        type=Path,
+        default=None,
+        help="output README (default tasks/README.md; tasks/README<N>.md with --extend-from)",
+    )
+    p.add_argument(
+        "--extend-from",
+        type=Path,
+        default=None,
+        help="existing task JSONL to keep and top up to --n tasks (extend_pilot)",
+    )
+    p.add_argument("--seed", type=int, default=PILOT_SEED, help=f"seed (default {PILOT_SEED})")
+    return p
+
+
+def main(argv: list[str] | None = None, *, root: Path = data.DATA_DIR) -> None:
+    """CLI: regenerate a task set and its README from the vintage data under ``root``.
+
+    Default (no options): tasks/pilot.jsonl and tasks/README.md via select_pilot.
+    ``--extend-from PATH``: keep the tasks in PATH and top up to ``--n`` with
+    :func:`extend_pilot`. ``--help`` prints help and exits before any work.
+    """
+    parser = _parser()
+    args = parser.parse_args(argv)
+    extend = args.extend_from is not None
+    n = args.n if args.n is not None else (EXTEND_N if extend else PILOT_N)
+    out = args.out or TASKS_DIR / (f"pilot{n}.jsonl" if extend else "pilot.jsonl")
+    readme = args.readme_out or TASKS_DIR / (f"README{n}.md" if extend else "README.md")
+    if extend and Path(out).resolve() == Path(args.extend_from).resolve():
+        parser.error("--out must differ from --extend-from (the base set is kept unchanged)")
     candidates = build_candidates(SERIES, root)
-    pilot = select_pilot(candidates, n=PILOT_N, seed=seed)
-    save_tasks(out_dir / "pilot.jsonl", pilot)
-    (out_dir / "README.md").write_text(render_readme(candidates, pilot, seed))
-    print(f"{len(candidates)} candidates; wrote {len(pilot)} tasks to {out_dir}")
+    if extend:
+        existing = load_tasks(args.extend_from)
+        _check_existing(existing, candidates)
+        chosen = extend_pilot(existing, candidates, n_total=n, seed=args.seed)
+        text = render_extended_readme(
+            candidates, chosen, existing, args.seed, Path(out), Path(args.extend_from)
+        )
+    else:
+        chosen = select_pilot(candidates, n=n, seed=args.seed)
+        text = render_readme(candidates, chosen, args.seed)
+    save_tasks(Path(out), chosen)
+    Path(readme).parent.mkdir(parents=True, exist_ok=True)
+    Path(readme).write_text(text)
+    print(f"{len(candidates)} candidates; wrote {len(chosen)} tasks to {out} and {readme}")
+
+
+def _check_existing(existing: list[Task], candidates: list[Task]) -> None:
+    """Warn if an existing task is not reproduced by the current candidates."""
+    by_id = {t.id: t for t in candidates}
+    stale = [t.id for t in existing if by_id.get(t.id) != t]
+    if stale:
+        warnings.warn(
+            f"extend: {len(stale)} existing task(s) not reproduced by the current "
+            f"candidates (kept unchanged): {', '.join(stale)}",
+            stacklevel=2,
+        )
 
 
 if __name__ == "__main__":
