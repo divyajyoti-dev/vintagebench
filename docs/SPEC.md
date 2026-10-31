@@ -41,6 +41,7 @@ answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips,
     1 No). Controls whose computation window touches the COVID collapse
     (Mar–Jun 2020; 2020 Q1–Q3 for GDP) are excluded; flips there stay eligible.
   - Non-UNRATE controls farther than a per-template cap (10 margins; 5 for GDP shrink; 40 for PAYEMS) from the threshold in both vintages are excluded as trivial.
+  - 60-task extension (tasks/pilot60.jsonl, tasks/README60.md): the 20 pilot tasks kept byte-identical plus 40 from extend_pilot(existing, candidates, n_total=60, seed=0) under the same rules; target 15/15/15/15 on flips × as-of answer, 6 UNRATE controls (3 Yes, 3 No).
 - tasks/README.md: table of all tasks (question, as-of answer, revised answer, flips).
 
 ## 4. Harness
