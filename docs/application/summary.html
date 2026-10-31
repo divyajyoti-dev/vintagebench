@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VintageBench Summary</title>
+<style>
+  :root {
+    --ink: #1c2430;
+    --muted: #5a6573;
+    --rule: #d5dae1;
+    --accent: #1f5f8b;
+    --accent-soft: #e8f0f7;
+    --warn: #8b4a1f;
+    --warn-soft: #f8efe7;
+    --ok: #2d6a3e;
+  }
+  @page { size: Letter; margin: 0.6in 0.65in; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; color: var(--ink); }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 10pt;
+    line-height: 1.38;
+  }
+  .page { page-break-after: always; break-after: page; }
+  .page:last-child { page-break-after: auto; break-after: auto; }
+  header.top { border-bottom: 2px solid var(--accent); padding-bottom: 6px; margin-bottom: 10px; }
+  .draft { font-size: 8pt; color: var(--warn); letter-spacing: .02em; margin: 0 0 4px; }
+  h1 { font-size: 19pt; margin: 0; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 2px 0 0; font-size: 10.5pt; }
+  .byline { color: var(--muted); font-size: 8.5pt; margin-top: 4px; }
+  h2 {
+    font-size: 11pt; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--accent); margin: 14px 0 5px; padding-bottom: 2px;
+    border-bottom: 1px solid var(--rule);
+  }
+  p { margin: 0 0 6px; }
+  ul { margin: 0 0 6px; padding-left: 16px; }
+  li { margin-bottom: 2px; }
+  .lede { font-size: 10.5pt; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  figure { margin: 4px 0 4px; }
+  figcaption { font-size: 8.5pt; color: var(--muted); margin-top: 3px; }
+  svg { width: 100%; height: auto; display: block; }
+  table { border-collapse: collapse; width: 100%; font-size: 8.8pt; margin: 4px 0 6px; }
+  th, td { padding: 3px 5px; text-align: right; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  th { font-weight: 600; color: var(--muted); border-bottom: 1.5px solid var(--ink); vertical-align: bottom; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  tr.sep td { border-top: 1.5px solid var(--ink); }
+  tr.ref td { color: var(--muted); }
+  .note { font-size: 8.5pt; color: var(--muted); }
+  .box { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 7px 10px; margin: 6px 0; }
+  .caveat { background: var(--warn-soft); border-left: 3px solid var(--warn); padding: 7px 10px; margin: 6px 0; }
+  .q { font-style: italic; }
+  .mono { font-family: Menlo, Consolas, monospace; font-size: 8.6pt; }
+  .yes { color: var(--ok); font-weight: 700; }
+  .no { color: var(--warn); font-weight: 700; }
+  .roadmap { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 4px; }
+  .step { border-top: 3px solid var(--accent); padding-top: 4px; font-size: 8.8pt; }
+  .step b { display: block; font-size: 9pt; color: var(--accent); }
+  .p2 { font-size: 9.6pt; }
+  .p2 h2 { margin: 10px 0 4px; }
+  .p2 ul { margin-bottom: 4px; }
+  footer { margin-top: 8px; font-size: 8pt; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 4px; }
+</style>
+</head>
+<body>
+
+<!-- ============ PAGE 1 ============ -->
+<section class="page">
+  <header class="top">
+    <p class="draft">DRAFT — not submitted. Numbers from results/PILOT.md and runs/20261031-041615.</p>
+    <h1>VintageBench</h1>
+    <p class="sub">Evaluating AI analysts on provisional data that gets revised</p>
+    <p class="byline">Divya Jyoti · UC Berkeley, MIMS (AI &amp; Data Science) · github.com/divyajyoti-dev/vintagebench (repository, to be made public)</p>
+  </header>
+
+  <h2>The problem</h2>
+  <p class="lede">Analysts act on numbers that are not final. Payrolls, GDP and inflation are revised for months or years after first release; companies restate results; clinical datasets are cleaned after interim looks; data pipelines backfill late records. A careful analyst answers with what was known <em>at the time</em>, says how firm the answer is, and later changes exactly the conclusions the revision overturns, and no others.</p>
+  <p>The data-analysis benchmarks I have found use static data, and the temporal-leakage benchmarks hold past facts fixed. VintageBench tests the missing case using real published data vintages from ALFRED (St. Louis Fed) for five US series: PAYEMS, GDPC1, PCEPI, INDPRO, and UNRATE as a low-revision control.</p>
+
+  <h2>One episode, two turns</h2>
+  <figure>
+    <svg viewBox="0 0 720 230" role="img" aria-label="Two-turn episode diagram">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#1c2430"/>
+        </marker>
+      </defs>
+      <!-- timeline -->
+      <line x1="20" y1="24" x2="700" y2="24" stroke="#5a6573" stroke-width="1.2" marker-end="url(#arr)"/>
+      <circle cx="120" cy="24" r="5" fill="#1f5f8b"/>
+      <text x="120" y="14" font-size="11" text-anchor="middle" fill="#1c2430" font-weight="600">as-of 2025-07-03 (first print)</text>
+      <circle cx="430" cy="24" r="5" fill="#8b4a1f"/>
+      <text x="430" y="14" font-size="11" text-anchor="middle" fill="#1c2430" font-weight="600">revision 2026-08-07</text>
+
+      <!-- Turn 1 -->
+      <rect x="20" y="40" width="250" height="118" rx="6" fill="#e8f0f7" stroke="#1f5f8b"/>
+      <text x="32" y="60" font-size="12" font-weight="700" fill="#1f5f8b">Turn 1: answer as of the date</text>
+      <text x="32" y="80" font-size="10.5" fill="#1c2430">System: "Today is 2025-07-03."</text>
+      <text x="32" y="97" font-size="10.5" fill="#1c2430">Tool get_series → as-of vintage only</text>
+      <text x="32" y="118" font-size="10.5" fill="#1c2430" font-family="Menlo, Consolas, monospace">{answer, confidence,</text>
+      <text x="32" y="133" font-size="10.5" fill="#1c2430" font-family="Menlo, Consolas, monospace"> values_used, caveats}</text>
+      <text x="32" y="150" font-size="10" fill="#5a6573">gold: Yes (+149.7k)</text>
+
+      <!-- arrow -->
+      <line x1="272" y1="99" x2="328" y2="99" stroke="#1c2430" stroke-width="1.4" marker-end="url(#arr)"/>
+      <text x="300" y="91" font-size="9" text-anchor="middle" fill="#5a6573">new release</text>
+
+      <!-- Turn 2 -->
+      <rect x="330" y="40" width="200" height="118" rx="6" fill="#f8efe7" stroke="#8b4a1f"/>
+      <text x="342" y="60" font-size="12" font-weight="700" fill="#8b4a1f">Turn 2: re-check</text>
+      <text x="342" y="80" font-size="10.5" fill="#1c2430">"A new data release is</text>
+      <text x="342" y="95" font-size="10.5" fill="#1c2430">available as of 2026-08-07."</text>
+      <text x="342" y="112" font-size="10.5" fill="#1c2430">Tool → revised vintage</text>
+      <text x="342" y="133" font-size="10.5" fill="#1c2430" font-family="Menlo, Consolas, monospace">{answer, confidence,</text>
+      <text x="342" y="148" font-size="10.5" fill="#1c2430" font-family="Menlo, Consolas, monospace"> changed, reason}</text>
+
+      <!-- arrow -->
+      <line x1="532" y1="99" x2="566" y2="99" stroke="#1c2430" stroke-width="1.4" marker-end="url(#arr)"/>
+
+      <!-- Grader -->
+      <rect x="568" y="40" width="132" height="118" rx="6" fill="#ffffff" stroke="#1c2430"/>
+      <text x="580" y="60" font-size="12" font-weight="700" fill="#1c2430">Grader</text>
+      <text x="580" y="74" font-size="9" fill="#5a6573">deterministic, no LLM</text>
+      <text x="580" y="92" font-size="10.5" fill="#1c2430">asof_correct</text>
+      <text x="580" y="107" font-size="10.5" fill="#1c2430">revised_correct</text>
+      <text x="580" y="122" font-size="10.5" fill="#1c2430">update_correct</text>
+      <text x="580" y="137" font-size="10.5" fill="#1c2430">leakage</text>
+      <text x="580" y="152" font-size="10.5" fill="#1c2430">Brier (turn 1)</text>
+
+      <!-- gold note -->
+      <text x="342" y="176" font-size="10" fill="#5a6573">gold: No (+33.7k) → flips = true</text>
+      <text x="20" y="200" font-size="10" fill="#5a6573">update_correct = (changed == flips): penalizes both missed updates on flips and unnecessary updates on controls.</text>
+      <text x="20" y="216" font-size="10" fill="#5a6573">leakage = a reported value matches a later vintage but not the as-of vintage (with rounding tolerance).</text>
+    </svg>
+    <figcaption>Figure 1. Each task is one two-turn episode. Gold answers are computed from the two vintages, never hand-labeled. Values shown are for the example below.</figcaption>
+  </figure>
+
+  <h2>A real flip task from the set</h2>
+  <div class="box">
+    <p class="mono" style="margin-bottom:4px">payems-avg3m-above-100k-2025-06 · PAYEMS (total nonfarm payrolls, thousands)</p>
+    <p class="q">"Was average monthly payroll growth over the 3 months ending June 2025 above 100k, i.e. is (level(June 2025) − level(March 2025)) / 3 above 100?"</p>
+  </div>
+  <table>
+    <thead>
+      <tr><th>Vintage</th><th>Date</th><th>Mar 2025</th><th>Apr 2025</th><th>May 2025</th><th>Jun 2025</th><th>3-month avg change</th><th>Gold</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>As of (first print)</td><td>2025-07-03</td><td>159,275</td><td>159,433</td><td>159,577</td><td>159,724</td><td>+149.7k</td><td class="yes">Yes</td></tr>
+      <tr><td>Revised</td><td>2026-08-07</td><td>158,377</td><td>158,485</td><td>158,498</td><td>158,478</td><td>+33.7k</td><td class="no">No</td></tr>
+    </tbody>
+  </table>
+  <p class="note">Levels as served by the point-in-time tool from the committed ALFRED vintages. A model that answers Yes in turn 1, then No with <span class="mono">changed: true</span> in turn 2, scores asof_correct, revised_correct and update_correct. A model that reports the revised June level in turn 1 is flagged for leakage.</p>
+
+  <h2>Task set (v0)</h2>
+  <ul>
+    <li><b>60 yes/no tasks</b>, 2016–2025: 30 flips (the revision changes the answer) and 30 controls, gold Yes share 50% both as of and revised. The flips fall into 18 independent clusters of overlapping data windows.</li>
+    <li>Templates: GDP shrink / growth above 2%; payroll weakest-in-12-months and 3-month average above 100k/150k; industrial production month-on-month fall; PCE inflation above 2.5%. Thresholds sit only at round numbers; near-ties and trivially distant controls are excluded.</li>
+  </ul>
+</section>
+
+<!-- ============ PAGE 2 ============ -->
+<section class="page p2">
+  <h2 style="margin-top:0">Pilot results</h2>
+  <p>Two OpenAI models, temperature 0, reasoning off, native tool calls, 3 trials per task. Counts are episodes; pass^3 counts tasks where all 3 trials were asof_correct. Brier is on turn-1 confidence (lower is better).</p>
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Task set</th><th>asof</th><th>revised</th><th>update<br>(flips)</th><th>update<br>(controls)</th><th>Leakage</th><th>Brier</th><th>pass^3</th><th>Cost</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>gpt-6-sol</td><td>20 tasks</td><td>60/60 (100%)</td><td>59/60 (98%)</td><td>29/30 (97%)</td><td>30/30 (100%)</td><td>0/60</td><td>0.000</td><td>20/20 (100%)</td><td>$0.503</td></tr>
+      <tr><td>gpt-6-luna</td><td>20 tasks</td><td>42/60 (70%)</td><td>50/60 (83%)</td><td>18/30 (60%)</td><td>25/30 (83%)</td><td>0/60</td><td>0.299</td><td>12/20 (60%)</td><td>$0.025</td></tr>
+      <tr class="sep"><td>gpt-6-sol</td><td>60 tasks</td><td>180/180 (100%)</td><td>179/180 (99%)</td><td>89/90 (99%)</td><td>90/90 (100%)</td><td>0/180</td><td>0.000</td><td>60/60 (100%)</td><td>$1.457</td></tr>
+      <tr><td>gpt-6-luna</td><td>60 tasks</td><td>141/180 (78%)</td><td>157/180 (87%)</td><td>65/90 (72%)</td><td>84/90 (93%)</td><td>0/180</td><td>0.216</td><td>41/60 (68%)</td><td>$0.072</td></tr>
+      <tr class="sep ref"><td>majority class</td><td>either</td><td>50%</td><td>50%</td><td>–</td><td>–</td><td>–</td><td>–</td><td>50%</td><td>$0</td></tr>
+    </tbody>
+  </table>
+  <p class="note">Sanity agents (oracle, always_yes, leaker, never_update; no API) behave as the spec expects on every metric. Each run's cost column counts every episode it scored, including episodes replayed from the response cache. Actual API spend: $0.53 (20-task pilot) plus $1.00 new (60-task run), $1.53 in total. An independent regrade confirmed every tool call was served at the correct vintage date and no prompt contained a gold answer. Average cost per episode: about $0.008 (gpt-6-sol) and $0.0004 (gpt-6-luna).</p>
+
+  <div class="cols">
+    <div>
+      <h2>What the pilot shows</h2>
+      <ul>
+        <li><b>gpt-6-sol is at the ceiling</b> on this set, so v0 cannot separate it from the oracle. Harder tasks are needed.</li>
+        <li><b>Most errors are label slips.</b> In the 60-task run, 30 of gpt-6-luna's 39 wrong turn-1 answers have an answer field that contradicts the model's own calculation; all 9 genuine reasoning errors are in one template ("weakest month of 12"). gpt-6-sol's only error is one turn-2 label slip. The schema puts <span class="mono">answer</span> first and reasoning was off; my hypothesis that this contributed is untested.</li>
+        <li><b>By cluster</b>, update_correct on flips is fully correct in 17/18 clusters for gpt-6-sol and 9/18 for gpt-6-luna (cluster-weighted mean 75%).</li>
+        <li><b>gpt-6-luna is overconfident:</b> in the 20-task pilot its mean confidence on wrong turn-1 answers was 0.998.</li>
+      </ul>
+    </div>
+    <div>
+      <h2>Limits of this evidence</h2>
+      <div class="caveat">
+        <ul style="margin:0">
+          <li>Small n and only <b>2 models</b>. The planned open-weight model was skipped because no API key was configured.</li>
+          <li><b>No leakage detected, but that is weak evidence:</b> the models copied tool values, and the check cannot see a memorized figure that is never reported.</li>
+          <li>Questions spell out the formula, so v0 is mostly arithmetic on point-in-time data.</li>
+          <li>Trials at temperature 0 are correlated, and flips cluster (18 clusters for 30 flips).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <h2>Roadmap</h2>
+  <div class="roadmap">
+    <div class="step"><b>Nov–Dec 2026</b>Reasoning-before-answer schema; reasoning-on configuration; open-weight model; label-contradiction diagnostic.</div>
+    <div class="step"><b>Jan–Feb 2027</b>Economists and statistical-agency analysts write and validate templates; about 300 tasks, including questions that do not spell out the formula.</div>
+    <div class="step"><b>Mar–Apr 2027</b>Independent grader validation against expert labels; red-teaming for shortcuts and memorization; second-domain prototype.</div>
+    <div class="step"><b>May–Jun 2027</b>Full runs across frontier and open-weight models; public release, leaderboard and paper.</div>
+  </div>
+
+  <h2>Beyond macro data</h2>
+  <p>The episode needs only two dated versions of a dataset and a programmatic gold answer. The same harness applies to <b>corporate restatements</b> (original against amended filings), <b>clinical data</b> (interim against locked datasets) and <b>data-pipeline backfills</b> (a table snapshot before and after late records arrive).</p>
+
+  <h2>Related work</h2>
+  <p class="note" style="font-size:8.8pt">Temporal leakage and knowledge cutoffs, with past facts held fixed: ExAnte (arXiv:2505.19533, 2025); Look-Ahead-Bench (arXiv:2601.13770, 2026). Data-analysis reliability on static data: LongDS-Bench (arXiv:2605.30434, 2026); TrustDABench (arXiv:2608.24145, 2026). Verification status is in the citation notes of the application draft.</p>
+
+  <footer>Data: U.S. Bureau of Labor Statistics (PAYEMS, UNRATE); U.S. Bureau of Economic Analysis (GDPC1, PCEPI); Board of Governors of the Federal Reserve System (INDPRO); vintages retrieved from ALFRED®, Federal Reserve Bank of St. Louis. This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis.</footer>
+</section>
+
+</body>
+</html>
