@@ -1408,12 +1408,13 @@ def render_extended_readme(
         '  excludes the date rule\'s "else the latest vintage" fallback, whose revised',
         "  answer could change when newer vintages are fetched.",
         "- Independence: a task's computation window is its target period plus the",
-        "  template's lookback (2 months for month-over-month, 2 quarters for GDP, 4",
-        "  months for the payroll 3-month average, 13 months for weakest-of-12 and PCE",
-        "  YoY). Two tasks in the same series overlap if their windows intersect. The",
-        "  picker's first criterion is the number of already chosen tasks a candidate",
-        "  overlaps, so an overlapping task is added only when no non-overlapping",
-        "  candidate is left in the stratum (or its fallback) being filled.",
+        "  template's lookback; window length (target included): 2 months for",
+        "  month-over-month, 2 quarters for GDP, 4 months for the payroll 3-month",
+        "  average, 13 months for weakest-of-12 and PCE YoY. Two tasks in the same",
+        "  series overlap if their windows intersect. The picker's first criterion is",
+        "  the number of already chosen tasks a candidate overlaps, so an overlapping",
+        "  task is added only when no non-overlapping candidate is left in the stratum",
+        "  (or its fallback) being filled.",
         "",
         f"Row order: the {len(existing)} tasks of `{base_name}` first, in their original",
         f"order, then the {len(new_ids)} new tasks sorted by id. The first {len(existing)} rows",
@@ -1489,6 +1490,7 @@ def _cluster_lines(rows: list[Task], clusters: dict[str, str]) -> list[str]:
     n_flip = len({clusters[t.id] for t in rows if t.flips})
     n_ctrl = len({clusters[t.id] for t in rows if not t.flips})
     multi = sorted((k, v) for k, v in groups.items() if len(v) > 1)
+    mixed = [k for k, v in multi if len({t.flips for t in v}) == 2]
     lines = [
         "",
         "## Clusters",
@@ -1500,7 +1502,9 @@ def _cluster_lines(rows: list[Task], clusters: dict[str, str]) -> list[str]:
         "",
         f"- Distinct clusters: {n_flip} among the {sum(t.flips for t in rows)} flips, "
         f"{n_ctrl} among the {sum(not t.flips for t in rows)} controls "
-        f"({len(groups)} in all).",
+        f"({len(groups)} in all). {len(mixed)} cluster(s) contain both a flip and a "
+        f"control ({', '.join(mixed) or 'none'}), which is why {n_flip} + {n_ctrl} "
+        f"{'=' if n_flip + n_ctrl == len(groups) else '≠'} {len(groups)}.",
         f"- Multi-task clusters ({len(multi)}):",
         "",
         "| cluster | tasks | members (flips marked *) |",
