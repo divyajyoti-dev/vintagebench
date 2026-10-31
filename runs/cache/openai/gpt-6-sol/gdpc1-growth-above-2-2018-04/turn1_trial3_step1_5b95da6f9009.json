@@ -1,0 +1,83 @@
+{
+ "provider": "openai",
+ "settings": {
+  "temperature": 0.0,
+  "temperature_sent": true,
+  "reasoning_effort": "none"
+ },
+ "request": {
+  "model": "gpt-6-sol",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Today is 2018-07-27. You are an economic data analyst.\nUse the get_series tool to look up data. Base your answers only on data that has been published as of the date the tool serves; do not use figures you may remember from later releases.\n\nWhen answering a question, reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1 that your answer is correct>, \"values_used\": {\"YYYY-MM-DD\": <series value>, ...}, \"caveats\": \"<short text>\"}\nvalues_used must list the exact series values you relied on, keyed by observation date.\n\nIf you are later told that a new data release is available, look up the data again and reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1>, \"changed\": <true if your answer changed, else false>, \"reason\": \"<short text>\"}"
+   },
+   {
+    "role": "user",
+    "content": "Question: Did real GDP grow faster than 2% (annualized) in Q2 2018, i.e. was the annualized growth rate of real GDP (GDPC1) from Q1 2018 to Q2 2018, 100 * ((level(Q2 2018) / level(Q1 2018))^4 - 1), above 2.0%?\nSeries: GDPC1"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_hx5R1Js9FO1rDHsH1MRoZndF",
+      "type": "function",
+      "function": {
+       "name": "get_series",
+       "arguments": "{\"series_id\": \"GDPC1\", \"start\": \"2018-01-01\", \"end\": \"2018-04-01\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_hx5R1Js9FO1rDHsH1MRoZndF",
+    "name": "get_series",
+    "content": "{\"series_id\": \"GDPC1\", \"as_of\": \"2018-07-27\", \"metadata\": {\"title\": \"Real Gross Domestic Product\", \"units\": \"Billions of Chained Dollars\", \"frequency\": \"Quarterly\", \"seasonal_adjustment\": \"Seasonally Adjusted Annual Rate\"}, \"observations\": [{\"date\": \"2018-01-01\", \"value\": 18323.963}, {\"date\": \"2018-04-01\", \"value\": 18507.2}]}"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_series",
+     "description": "Return observations of an economic data series as published on or before today, for observation dates in [start, end]. For known series the result also has a 'metadata' object with the series title, units, frequency and seasonal adjustment.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "series_id": {
+        "type": "string",
+        "description": "FRED series ID, e.g. PAYEMS"
+       },
+       "start": {
+        "type": "string",
+        "description": "first observation date YYYY-MM-DD"
+       },
+       "end": {
+        "type": "string",
+        "description": "last observation date YYYY-MM-DD"
+       }
+      },
+      "required": [
+       "series_id",
+       "start",
+       "end"
+      ]
+     }
+    }
+   }
+  ],
+  "temperature": 0.0,
+  "reasoning_effort": "none",
+  "max_completion_tokens": 2048
+ },
+ "response": {
+  "text": "{\"answer\":\"yes\",\"confidence\":0.999,\"values_used\":{\"2018-01-01\":18323.963,\"2018-04-01\":18507.2},\"caveats\":\"The annualized growth rate is approximately 4.06%; these figures may be revised.\"}",
+  "tool_calls": [],
+  "input_tokens": 655,
+  "output_tokens": 64,
+  "cost_usd": 0.00195,
+  "cached": false
+ }
+}

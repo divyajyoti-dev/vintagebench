@@ -1,0 +1,83 @@
+{
+ "provider": "openai",
+ "settings": {
+  "temperature": 0.0,
+  "temperature_sent": true,
+  "reasoning_effort": "none"
+ },
+ "request": {
+  "model": "gpt-6-luna",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Today is 2023-04-07. You are an economic data analyst.\nUse the get_series tool to look up data. Base your answers only on data that has been published as of the date the tool serves; do not use figures you may remember from later releases.\n\nWhen answering a question, reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1 that your answer is correct>, \"values_used\": {\"YYYY-MM-DD\": <series value>, ...}, \"caveats\": \"<short text>\"}\nvalues_used must list the exact series values you relied on, keyed by observation date.\n\nIf you are later told that a new data release is available, look up the data again and reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1>, \"changed\": <true if your answer changed, else false>, \"reason\": \"<short text>\"}"
+   },
+   {
+    "role": "user",
+    "content": "Question: Was March 2023 the weakest of the 12 months ending in March 2023 for payroll growth, i.e. is change(March 2023) lower than each of change(April 2022) through change(February 2023), where change(month) = level(month) - level(previous month), with total nonfarm payrolls (PAYEMS) in thousands of jobs?\nSeries: PAYEMS"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_Gsy72OJ60MrGN5DjD4vZPxIE",
+      "type": "function",
+      "function": {
+       "name": "get_series",
+       "arguments": "{\"series_id\": \"PAYEMS\", \"start\": \"2022-03-01\", \"end\": \"2023-03-01\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_Gsy72OJ60MrGN5DjD4vZPxIE",
+    "name": "get_series",
+    "content": "{\"series_id\": \"PAYEMS\", \"as_of\": \"2023-04-07\", \"metadata\": {\"title\": \"All Employees, Total Nonfarm\", \"units\": \"Thousands of Persons\", \"frequency\": \"Monthly\", \"seasonal_adjustment\": \"Seasonally Adjusted\"}, \"observations\": [{\"date\": \"2022-03-01\", \"value\": 151424.0}, {\"date\": \"2022-04-01\", \"value\": 151678.0}, {\"date\": \"2022-05-01\", \"value\": 152042.0}, {\"date\": \"2022-06-01\", \"value\": 152412.0}, {\"date\": \"2022-07-01\", \"value\": 152980.0}, {\"date\": \"2022-08-01\", \"value\": 153332.0}, {\"date\": \"2022-09-01\", \"value\": 153682.0}, {\"date\": \"2022-10-01\", \"value\": 154006.0}, {\"date\": \"2022-11-01\", \"value\": 154296.0}, {\"date\": \"2022-12-01\", \"value\": 154535.0}, {\"date\": \"2023-01-01\", \"value\": 155007.0}, {\"date\": \"2023-02-01\", \"value\": 155333.0}, {\"date\": \"2023-03-01\", \"value\": 155569.0}]}"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_series",
+     "description": "Return observations of an economic data series as published on or before today, for observation dates in [start, end]. For known series the result also has a 'metadata' object with the series title, units, frequency and seasonal adjustment.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "series_id": {
+        "type": "string",
+        "description": "FRED series ID, e.g. PAYEMS"
+       },
+       "start": {
+        "type": "string",
+        "description": "first observation date YYYY-MM-DD"
+       },
+       "end": {
+        "type": "string",
+        "description": "last observation date YYYY-MM-DD"
+       }
+      },
+      "required": [
+       "series_id",
+       "start",
+       "end"
+      ]
+     }
+    }
+   }
+  ],
+  "temperature": 0.0,
+  "reasoning_effort": "none",
+  "max_completion_tokens": 2048
+ },
+ "response": {
+  "text": "{\"answer\":\"yes\",\"confidence\":1,\"values_used\":{\"2022-03-01\":151424.0,\"2022-04-01\":151678.0,\"2022-05-01\":152042.0,\"2022-06-01\":152412.0,\"2022-07-01\":152980.0,\"2022-08-01\":153332.0,\"2022-09-01\":153682.0,\"2022-10-01\":154006.0,\"2022-11-01\":154296.0,\"2022-12-01\":154535.0,\"2023-01-01\":155007.0,\"2023-02-01\":155333.0,\"2023-03-01\":155569.0},\"caveats\":\"March 2023 payroll growth was 236 thousand, lower than each of the prior 11 monthly changes; the next-lowest was 239 thousand in December 2022.\"}",
+  "tool_calls": [],
+  "input_tokens": 868,
+  "output_tokens": 212,
+  "cost_usd": 0.00019280000000000002,
+  "cached": false
+ }
+}
