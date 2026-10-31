@@ -1,0 +1,101 @@
+{
+ "provider": "openai",
+ "settings": {
+  "temperature": 0.0,
+  "temperature_sent": true,
+  "reasoning_effort": "none"
+ },
+ "request": {
+  "model": "gpt-6-sol",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Today is 2018-12-07. You are an economic data analyst.\nUse the get_series tool to look up data. Base your answers only on data that has been published as of the date the tool serves; do not use figures you may remember from later releases.\n\nWhen answering a question, reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1 that your answer is correct>, \"values_used\": {\"YYYY-MM-DD\": <series value>, ...}, \"caveats\": \"<short text>\"}\nvalues_used must list the exact series values you relied on, keyed by observation date.\n\nIf you are later told that a new data release is available, look up the data again and reply with ONLY a JSON object:\n{\"answer\": \"yes\" or \"no\", \"confidence\": <probability 0-1>, \"changed\": <true if your answer changed, else false>, \"reason\": \"<short text>\"}"
+   },
+   {
+    "role": "user",
+    "content": "Question: Was November 2018 the weakest of the 12 months ending in November 2018 for payroll growth, i.e. is change(November 2018) lower than each of change(December 2017) through change(October 2018), where change(month) = level(month) - level(previous month), with total nonfarm payrolls (PAYEMS) in thousands of jobs?\nSeries: PAYEMS"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_pphzqG8lU4h9RTwlvK8MKro5",
+      "type": "function",
+      "function": {
+       "name": "get_series",
+       "arguments": "{\"series_id\": \"PAYEMS\", \"start\": \"2017-11-01\", \"end\": \"2018-11-01\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_pphzqG8lU4h9RTwlvK8MKro5",
+    "name": "get_series",
+    "content": "{\"series_id\": \"PAYEMS\", \"as_of\": \"2018-12-07\", \"metadata\": {\"title\": \"All Employees, Total Nonfarm\", \"units\": \"Thousands of Persons\", \"frequency\": \"Monthly\", \"seasonal_adjustment\": \"Seasonally Adjusted\"}, \"observations\": [{\"date\": \"2017-11-01\", \"value\": 147450.0}, {\"date\": \"2017-12-01\", \"value\": 147625.0}, {\"date\": \"2018-01-01\", \"value\": 147801.0}, {\"date\": \"2018-02-01\", \"value\": 148125.0}, {\"date\": \"2018-03-01\", \"value\": 148280.0}, {\"date\": \"2018-04-01\", \"value\": 148455.0}, {\"date\": \"2018-05-01\", \"value\": 148723.0}, {\"date\": \"2018-06-01\", \"value\": 148931.0}, {\"date\": \"2018-07-01\", \"value\": 149096.0}, {\"date\": \"2018-08-01\", \"value\": 149382.0}, {\"date\": \"2018-09-01\", \"value\": 149501.0}, {\"date\": \"2018-10-01\", \"value\": 149738.0}, {\"date\": \"2018-11-01\", \"value\": 149893.0}]}"
+   },
+   {
+    "role": "assistant",
+    "content": "{\"answer\":\"no\",\"confidence\":1.0,\"values_used\":{\"2018-08-01\":149382.0,\"2018-09-01\":149501.0,\"2018-10-01\":149738.0,\"2018-11-01\":149893.0},\"caveats\":\"As published on 2018-12-07. November gained 155 thousand jobs; September gained only 119 thousand.\"}"
+   },
+   {
+    "role": "user",
+    "content": "A new data release is available as of 2020-01-10. Re-check your conclusion."
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_series",
+     "description": "Return observations of an economic data series as published on or before today, for observation dates in [start, end]. For known series the result also has a 'metadata' object with the series title, units, frequency and seasonal adjustment.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "series_id": {
+        "type": "string",
+        "description": "FRED series ID, e.g. PAYEMS"
+       },
+       "start": {
+        "type": "string",
+        "description": "first observation date YYYY-MM-DD"
+       },
+       "end": {
+        "type": "string",
+        "description": "last observation date YYYY-MM-DD"
+       }
+      },
+      "required": [
+       "series_id",
+       "start",
+       "end"
+      ]
+     }
+    }
+   }
+  ],
+  "temperature": 0.0,
+  "reasoning_effort": "none",
+  "max_completion_tokens": 2048
+ },
+ "response": {
+  "text": "",
+  "tool_calls": [
+   {
+    "id": "call_3CDK4mhEmHxROZFItlGEPx75",
+    "name": "get_series",
+    "arguments": {
+     "series_id": "PAYEMS",
+     "start": "2017-11-01",
+     "end": "2018-11-01"
+    }
+   }
+  ],
+  "input_tokens": 990,
+  "output_tokens": 37,
+  "cost_usd": 0.00235,
+  "cached": false
+ }
+}
