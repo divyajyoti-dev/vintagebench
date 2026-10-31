@@ -38,8 +38,8 @@ per-episode scores and with `summary.md` in every cell.
   column (§3) totals $1.5286 (gpt-6-sol $1.4570, gpt-6-luna $0.0716). That total is the
   nominal token cost of all 360 episodes: $0.5274 for the replayed pilot episodes plus
   $1.0012 for the new ones. It is not new spend. It equals total actual spend across
-  both runs only by coincidence, because the replayed episodes are exactly the ones the
-  20-task run paid for.
+  both runs because the replayed episodes' nominal cost is exactly what the 20-task
+  run paid, smoke test included.
 
 **Deviation from SPEC §7.** SPEC §7 calls for 3 models, including one open-weight model
 served by Together. Both runs used only the 2 OpenAI models: the Together open-weight
@@ -210,11 +210,12 @@ vintage reasoning, so the gate result says little about vintage reasoning itself
 
 These three come from the 20-task run, `runs/20261030-210632/results.jsonl`. The same
 episodes appear unchanged in the 60-task run, because they were replayed from the cache.
-Quotes are verbatim.
+Quotes of model output are verbatim. Questions are paraphrased; the full text is in
+`tasks/pilot60.jsonl`.
 
 ### 5.1 gpt-6-sol, `gdpc1-growth-above-2-2018-10`, trial 3: missed update on a flip
 
-- **Question:** Did real GDP grow faster than 2% (annualized) in Q4 2018 (GDPC1, Q3→Q4 2018)?
+- **Question (paraphrased):** Did real GDP grow faster than 2% (annualized) in Q4 2018 (GDPC1, Q3→Q4 2018)?
 - **Gold:** as of 2019-02-28 **Yes** (2.59%); revised as of 2020-03-26 **No** (1.09%). This is a flip.
 - **Values used:** as-of 2018-07-01 = 18664.973 and 2018-10-01 = 18784.632; revised 18732.72 and 18783.548.
 - **Model:** turn 1 answered "yes" (confidence 0.99), which is correct. Turn 2 answered
@@ -230,7 +231,7 @@ Quotes are verbatim.
 
 ### 5.2 gpt-6-luna, `pcepi-yoy-above-2.5-2018-10`, trials 1–3: wrong as-of answer, then an update on a control
 
-- **Question:** Is PCE inflation (year over year) above 2.5% for October 2018 (PCEPI)?
+- **Question (paraphrased):** Is PCE inflation (year over year) above 2.5% for October 2018 (PCEPI)?
 - **Gold:** as of 2018-11-29 **No** (1.98%); revised as of 2019-12-20 **No** (2.04%). This is a control.
 - **Values used:** 2017-10-01 = 106.664 and 2018-10-01 = 108.772; revised 106.538 and 108.71.
 - **Model, turn 1:** answered **"yes"** with confidence 1 in all 3 trials. Its caveat
@@ -247,7 +248,7 @@ Quotes are verbatim.
 
 ### 5.3 gpt-6-luna, `payems-weakest-12m-2021-12`, trials 1–3: a genuine reasoning error
 
-- **Question:** Was December 2021 the weakest of the 12 months ending in December 2021
+- **Question (paraphrased):** Was December 2021 the weakest of the 12 months ending in December 2021
   for payroll growth (PAYEMS monthly change below each of January–November 2021)?
 - **Gold:** as of 2022-01-07 **Yes**. December's change was +199k, and the smallest of
   the prior 11 months was +233k (January). Revised as of 2023-02-03 **No**: December was
@@ -256,9 +257,9 @@ Quotes are verbatim.
   2021-11-01 = 148752 and 2021-12-01 = 148951 as of; 149173 and 149742 revised.
 - **Model, turn 1:** answered **"no"** with confidence 1 in all 3 trials. Its caveat
   was: *"December's increase was 199 thousand jobs; November's was 249 thousand, so
-  December was not the weakest month."*
+  December was not the weakest month."* (trial 1; trials 2–3 near-identical)
 - **Model, turn 2:** answered "no" (correct) with `changed: false`.
-- **Why wrong:** this is the only wrong yes/no answer in the 20-task pilot whose label
+- **Why wrong:** this is the only task in the 20-task pilot (3 trial answers) whose wrong label
   agrees with the model's own text. On the 60, all 12 such reasoning errors are on this
   template (§3.3). The reasoning itself is wrong: December (199k) is below November
   (249k) and below every other month, yet the model concludes it was "not the weakest".
