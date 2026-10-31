@@ -989,6 +989,13 @@ def test_readme60_matches_render(real_candidates: list[Task]) -> None:
     )
     assert (repo / "README60.md").read_text() == text
     assert tasks.EXTEND_COMMAND in text
+    assert "window length (target included): 2 months for" in text
+    # Mixed flip/control clusters explain why flip + control cluster counts exceed the total.
+    cl = tasks.task_clusters(p60)
+    mixed = {cl[t.id] for t in p60 if t.flips} & {cl[t.id] for t in p60 if not t.flips}
+    n_f, n_c = len({cl[t.id] for t in p60 if t.flips}), len({cl[t.id] for t in p60 if not t.flips})
+    assert n_f + n_c - len(mixed) == len(set(cl.values()))
+    assert f"{len(mixed)} cluster(s) contain both a flip and a control" in text
 
 
 # --- revision gap, computation windows, overlap avoidance, clusters ---------------

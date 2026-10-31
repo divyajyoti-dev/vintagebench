@@ -25,12 +25,13 @@ Two extra rules apply to the new tasks only (the base tasks are unchanged):
   excludes the date rule's "else the latest vintage" fallback, whose revised
   answer could change when newer vintages are fetched.
 - Independence: a task's computation window is its target period plus the
-  template's lookback (2 months for month-over-month, 2 quarters for GDP, 4
-  months for the payroll 3-month average, 13 months for weakest-of-12 and PCE
-  YoY). Two tasks in the same series overlap if their windows intersect. The
-  picker's first criterion is the number of already chosen tasks a candidate
-  overlaps, so an overlapping task is added only when no non-overlapping
-  candidate is left in the stratum (or its fallback) being filled.
+  template's lookback; window length (target included): 2 months for
+  month-over-month, 2 quarters for GDP, 4 months for the payroll 3-month
+  average, 13 months for weakest-of-12 and PCE YoY. Two tasks in the same
+  series overlap if their windows intersect. The picker's first criterion is
+  the number of already chosen tasks a candidate overlaps, so an overlapping
+  task is added only when no non-overlapping candidate is left in the stratum
+  (or its fallback) being filled.
 
 Row order: the 20 tasks of `tasks/pilot.jsonl` first, in their original
 order, then the 40 new tasks sorted by id. The first 20 rows
@@ -124,7 +125,7 @@ A cluster is a connected component of the overlap graph within one series
 `<SERIES>:<first month>..<last month>` of the union of the members' windows.
 Use clusters, not tasks, as the independent unit when aggregating results.
 
-- Distinct clusters: 18 among the 30 flips, 30 among the 30 controls (44 in all).
+- Distinct clusters: 18 among the 30 flips, 30 among the 30 controls (44 in all). 4 cluster(s) contain both a flip and a control (GDPC1:2015-10..2016-04, INDPRO:2017-06..2017-08, PAYEMS:2018-12..2019-04, PCEPI:2023-01..2024-11), which is why 18 + 30 ≠ 44.
 - Multi-task clusters (9):
 
 | cluster | tasks | members (flips marked *) |
