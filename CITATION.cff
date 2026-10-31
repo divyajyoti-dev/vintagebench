@@ -12,7 +12,6 @@ authors:
   - family-names: Jyoti
     given-names: Divya
 version: 0.0.1
-date-released: "2026-10-31"
 repository-code: "https://github.com/divyajyoti-dev/vintagebench"
 url: "https://github.com/divyajyoti-dev/vintagebench"
 license: MIT

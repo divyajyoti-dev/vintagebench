@@ -84,7 +84,7 @@ pytest && ruff check .        # tests never call the network
 **1. Data (optional; the vintages are committed in `data/vintages/`).**
 
 ```bash
-python scripts/fetch_data.py            # fetches only series without a parquet file
+python scripts/fetch_data.py            # fetches only series without a parquet file; rewrites data/README.md
 python scripts/fetch_data.py --force    # refetch all 5 series (needs FRED_API_KEY)
 python scripts/fetch_data.py --readme   # only rewrite data/README.md from the files
 ```
@@ -263,15 +263,15 @@ If you use VintageBench, please cite it as below and also cite the data sources
 [CITATION.cff](CITATION.cff).
 
 > Divya Jyoti. *VintageBench: do AI analysts reason correctly about provisional data
-> that is later revised?* Version 0.1.0, 2026.
+> that is later revised?* Version 0.0.1 (pre-release), 2026.
 > https://github.com/divyajyoti-dev/vintagebench
 
 ```bibtex
 @software{jyoti_vintagebench_2026,
   author  = {Jyoti, Divya},
   title   = {VintageBench},
-  version = {0.1.0},
-  date    = {2026-10-31},
+  version = {0.0.1},
+  year    = {2026},
   url     = {https://github.com/divyajyoti-dev/vintagebench}
 }
 ```
