@@ -23,7 +23,7 @@ ANLP-ESG, github.com/divyajyoti-dev/ANLP-ESG (public): an end-to-end NLP pipelin
 
 - Layout-aware extraction of text blocks, figures and tables with an OCR fallback, plus header/footer cleaning, producing corpora for seven companies' reports.
 - Topic modeling with LDA, NMF and BERTopic, with tuning and metric comparison, and an analysis of structural shifts around COVID.
-- Claim/evidence detection: sentence-level CLAIM/EVIDENCE/OTHER labels from dual annotation adjudicated into a 372-sentence gold set, a Cohen's kappa script, and DistilBERT classifier inference with checkpoint/resume.
+- Claim/evidence detection: sentence-level CLAIM/EVIDENCE/OTHER labels from dual annotation adjudicated into a 350-sentence gold set, a Cohen's kappa script, and DistilBERT classifier inference with checkpoint/resume.
 <!-- /answer -->
 (Word count: 82/100)
 
@@ -41,17 +41,17 @@ VintageBench: Evaluating AI Analysts on Provisional Data That Gets Revised
 
 **Test bed.** US economic data vintages from ALFRED (St. Louis Fed) give a real, dated record of every published value. VintageBench v0 uses five series: PAYEMS, GDPC1, PCEPI, INDPRO, and UNRATE as a low-revision control.
 
-**Task.** Turn 1 gives the model a yes/no question (for example, "Was average monthly payroll growth over the 3 months ending June 2025 above 100k?"), tells it today is the as-of date, and provides a get_series tool that returns only data published by that date. It replies in JSON: answer, confidence, the values used, and caveats. Turn 2 announces a new release; the tool now serves the revised vintage, and the model returns answer, confidence, whether its conclusion changed, and why. In this example the first print gives +149.7k (Yes); a year later the revised data give +33.7k (No).
+**Task.** Turn 1 gives the model a yes/no question (for example, "Was average monthly payroll growth over the 3 months ending June 2025 above 100k …?"), tells it today is the as-of date, and provides a get_series tool that returns only data published by that date. It replies in JSON: answer, confidence, the values used, and caveats. Turn 2 announces a new release; the tool now serves the revised vintage, and the model returns answer, confidence, whether its conclusion changed, and why. In this example the first print gives +149.7k (Yes); a year later the revised data give +33.7k (No).
 
 **Grading.** Gold answers are computed programmatically from the two vintages. The grader is deterministic: asof_correct, revised_correct, update_correct (changed exactly when the gold flips, penalizing missed and unnecessary updates), leakage (a reported value matching a later vintage but not the as-of one), and Brier score on turn-1 confidence. Four no-API sanity agents (oracle, always-yes, leaker, never-update) check each metric.
 
-**Pilot.** 60 tasks (30 flips in 18 independent clusters, 30 controls, 50% Yes), 3 trials each, reasoning off. gpt-6-sol: asof 180/180, revised 179/180, update on flips 89/90, controls 90/90, Brier 0.000, pass^3 60/60. gpt-6-luna: asof 141/180 (78%), revised 157/180 (87%), flips 65/90 (72%), controls 84/90 (93%), Brier 0.216, pass^3 41/60 (68%). By cluster, gpt-6-luna updates correctly in every episode of 9 of the 18 flip clusters; gpt-6-sol does so in 17. Of gpt-6-luna's 39 wrong turn-1 answers, 30 are label slips, where the answer field contradicts its own calculation; all 9 genuine reasoning errors come from one template. My untested hypothesis is that the answer-first schema with reasoning off contributes to the slips. Zero leakage is weak evidence: the models copied tool values. With two models and small n, these are early signals; gpt-6-sol is already at the ceiling.
+**Pilot.** 60 tasks (30 flips in 18 overlap clusters, 30 controls, 50% Yes), 3 trials each, reasoning off. gpt-6-sol: asof 180/180, revised 179/180, update on flips 89/90, controls 90/90, Brier 0.000, pass^3 60/60. gpt-6-luna: asof 141/180 (78%), revised 157/180 (87%), flips 65/90 (72%), controls 84/90 (93%), Brier 0.216, pass^3 41/60 (68%). By cluster, gpt-6-luna updates correctly in every episode of 9 of the 18 flip clusters; gpt-6-sol does so in 17. Of gpt-6-luna's 39 wrong turn-1 answers, 30 are label slips, where the answer field contradicts its own calculation; all 9 genuine reasoning errors come from one template. My untested hypothesis is that the answer-first schema with reasoning off contributes to the slips. Zero leakage is weak evidence: the models copied tool values. With two models and small n, these are early signals; gpt-6-sol is already at the ceiling.
 
-**Expected outputs.** A public benchmark of several hundred expert-validated tasks, harder templates where the question does not spell out the formula and models must judge how provisional a figure is, a stronger memorization probe, a leaderboard across frontier and open-weight models, and a paper.
+**Expected outputs.** A public benchmark of about 300 expert-validated tasks, harder templates where the question does not spell out the formula and models must judge how provisional a figure is, a stronger memorization probe, a leaderboard across frontier and open-weight models, and a paper.
 
 **Generalization.** The episode format needs only two dated versions of a dataset and a programmatic gold. The same harness applies to corporate restatements (original against amended filings), clinical data (interim against locked datasets) and pipeline backfills (a table snapshot before and after late data arrive). I plan to prototype one of these.
 <!-- /answer -->
-(Word count: 497/500)
+(Word count: 498/500)
 
 ## 4. Difference from existing benchmarks
 
@@ -67,7 +67,7 @@ ExAnte (Liu et al., arXiv:2505.19533, 2025) and Look-Ahead-Bench (Benhenda, arXi
 
 **Snorkel engineering support.** I would ask for help to scale the task pipeline, validate the grader independently against expert labels, and red-team the benchmark for shortcuts, leakage paths and memorization.
 
-**Compute and hosting.** In the pilot, an episode cost $0.008 on the frontier model and $0.0004 on the small model, with reasoning off. A 500-task, 3-trial run is 1,500 episodes, about $12 per frontier model. Ten models in two configurations come to about $250; I request $1,000 of API credit to allow for reasoning tokens and reruns. Open-weight models would run through a hosted inference API. Hosting needs are a public repository and a static leaderboard.
+**Compute and hosting.** In the pilot, an episode cost $0.008 on the frontier model and $0.0004 on the small model, with reasoning off. A 300-task, 3-trial run is 900 episodes, about $7 per frontier model. Ten models in two configurations come to about $150; I request $600 of API credit to allow for reasoning tokens and reruns. Open-weight models would run through a hosted inference API. Hosting needs are a public repository and a static leaderboard.
 
 **Milestones.**
 - Nov–Dec 2026: reasoning-first schema, open-weight model, label-contradiction diagnostic.
@@ -96,10 +96,15 @@ Eight months, November 2026 to June 2027, following the milestones above.
 
 ## Appendix: Citation verification notes
 
-This appendix is not part of any answer. arxiv.org and huggingface.co could not be fetched from this session (blocked by network policy), so no paper was read in full.
+This appendix is not part of any answer. arxiv.org and huggingface.co could not be fetched from this session (blocked by network policy), so no paper was read in full. Three GitHub pages were fetched in this session with WebFetch, which returns a model-written summary of the page rather than its raw text; statements below marked "fetched" rest on those summaries.
 
-- **ExAnte, arXiv:2505.19533 (2025).** The title, ID, authors (Yachuan Liu et al., U. Michigan) and May 2025 submission come from WebSearch result summaries of the arXiv listing. Its scope (temporal leakage and cutoffs for stock, Wikipedia, publication and QA tasks; no mention of revisions or vintages) was confirmed on the authors' code repository, github.com/yachuan/ExAnte, which does not state the arXiv ID. The EACL 2026 venue comes from a search summary only and is not claimed above.
-- **Look-Ahead-Bench, arXiv:2601.13770 (2026).** The title, arXiv ID and scope (look-ahead bias in point-in-time LLMs, measured through alpha decay in simulated trading) were confirmed on the author's repository, github.com/benstaf/lookaheadbench, which does not mention data revisions. The author and January 2026 date come from search summaries.
-- **LongDS-Bench, arXiv:2605.30434 (2026).** The title, arXiv ID and EMNLP 2026 acceptance were confirmed on the authors' repository, github.com/zjunlp/DataMind. The data source (Kaggle notebooks, 68 tasks) and the author list come from search summaries only, so the answer says only "static" data. The repository page does not mention data revisions.
-- **TrustDABench, arXiv:2608.24145 (2026).** Verified only through WebSearch summaries of the arXiv PDF (perturbation operators over existing data-analysis QA sets, testing insufficient evidence and representation changes). No primary source was read. The first-author name (Shi) and August 2026 date come from earlier search notes. The answer keeps the claim general.
-- **"Neither involves revised values"** is based on the abstracts as summarized and on the repository pages. It is not a claim from a full reading of the papers.
+- **ExAnte, arXiv:2505.19533 (2025).** Title, ID, authors (Yachuan Liu et al., U. Michigan) and May 2025 submission: WebSearch summaries of the arXiv listing only. Scope: fetched https://github.com/yachuan/ExAnte in this session; the page describes measuring temporal leakage and ex-ante inference (stock forecasting, time-sensitive QA, Wikipedia event generation, publication forecasting) and does not mention data revisions or vintages. That page does not state the arXiv ID or venue. The EACL 2026 venue is from search summaries only and is not claimed in the answers.
+- **Look-Ahead-Bench, arXiv:2601.13770 (2026).** Fetched https://github.com/benstaf/lookaheadbench in this session; the page names the paper by this title and arXiv ID and describes measuring look-ahead bias through alpha decay in simulated agentic trading, with no mention of data revisions. Author (Mostapha Benhenda) and January 2026 date: search summaries only.
+- **LongDS-Bench, arXiv:2605.30434 (2026).** Fetched https://github.com/zjunlp/DataMind in this session; the page names LongDS-Bench with this title and arXiv ID, says it was accepted to EMNLP 2026, and does not mention data revisions. The EMNLP venue is not claimed in the answers. Data source (Kaggle notebooks, 68 tasks) and author list: search summaries only, so the answer says only "static" data.
+- **TrustDABench, arXiv:2608.24145 (2026).** Search summaries only (perturbation operators over existing data-analysis QA sets, testing insufficient evidence and representation changes). No primary source was read. First-author name (Shi) and August 2026 date: earlier search notes only. The answer keeps the claim general.
+- **"Neither involves revised values"** rests on search summaries of the abstracts and on the fetched repository pages, not on a full reading of the papers.
+
+**Related work not cited in the answers (UNVERIFIED).**
+- Crane, Karra & Soto, "Total Recall? Evaluating the Macroeconomic Knowledge of Large Language Models". Reported to find that LLMs confuse first-print macro values with later revisions, the closest topic match to VintageBench. Seen only through a Substack summary; venue, year and ID unverified.
+- Banco de la República (Colombia) working paper, "Experimenting with Large Language Models for Inflation Forecasting in Colombia", reported to use real-time data vintages to limit look-ahead bias. https://www.banrep.gov.co/en/publications-research/working-papers-economics/experimenting-llm-inflation-forecasting (not fetched).
+- Also seen at listing level only: Eliseev & Seleznev, "Fake Date Tests" (arXiv:2601.07992), and Gao, Jiang & Yan, "Detecting Lookahead Bias in LLM Forecasts" (arXiv:2512.23847), both on look-ahead bias in LLM forecasts.
