@@ -9,8 +9,9 @@ whether answers are right as of the date, whether the model leaks later revised
 figures, whether its confidence is calibrated, and whether it updates exactly the
 conclusions that the revision should change.
 
-**Status:** pilot complete (2 OpenAI models × 20 tasks × 3 trials). Results:
-[results/PILOT.md](results/PILOT.md). Spec: [docs/SPEC.md](docs/SPEC.md).
+**Status:** pilot complete: 2 OpenAI models × 3 trials on a 20-task pilot and on a
+60-task set (the 20 plus 40 new). Results: [results/PILOT.md](results/PILOT.md). Spec:
+[docs/SPEC.md](docs/SPEC.md).
 
 ## How to run
 
@@ -51,20 +52,34 @@ request/response is cached in `runs/cache/`, so reruns of the same episodes are 
 
 ## Pilot results
 
-Full run `runs/20261030-210632/`: 20 tasks (10 flips, 10 controls) × 3 trials per model,
-temperature 0, reasoning off. Total API spend $0.53 (smoke test included). The pilot
-ran 2 models instead of the 3 in SPEC §7: the Together open-weight model was skipped at
-the user's request; no Together API key was configured.
+Two full runs: `runs/20261030-210632/` (20 tasks: 10 flips, 10 controls) and
+`runs/20261031-041615/` (60 tasks: 30 flips in 18 overlap clusters, 30 controls). Both
+used 3 trials per model, temperature 0 and reasoning off. API spend was $0.5274 for
+the 20-task run (smoke test included) plus $1.0012 new for the 60-task run (the
+pilot 20 were replayed from cache), about $1.53 in all. Cost columns are the
+recorded cost of every episode in the run, cached ones included. Both runs used 2
+models instead of the 3 in SPEC §7: the Together open-weight model was skipped at
+the user's request, and no Together API key was configured.
 
-| Model | asof_correct | revised_correct | update_correct (flips) | update_correct (controls) | Leakage | Brier | pass^3 (asof) | Cost (USD) |
-|---|---|---|---|---|---|---|---|---|
-| gpt-6-sol | 60/60 (100%) | 59/60 (98%) | 29/30 (97%) | 30/30 (100%) | 0/60 (0%) | 0.000 | 20/20 (100%) | 0.5029 |
-| gpt-6-luna | 42/60 (70%) | 50/60 (83%) | 18/30 (60%) | 25/30 (83%) | 0/60 (0%) | 0.299 | 12/20 (60%) | 0.0245 |
-| majority class | 30/60 (50%) | 30/60 (50%) | – | – | – | – | 10/20 (50%) | 0 |
+| Tasks | Model | asof_correct | revised_correct | update_correct (flips) | update_correct (controls) | Leakage | Brier | pass^3 (asof) | Cost (USD) |
+|---|---|---|---|---|---|---|---|---|---|
+| 20 | gpt-6-sol | 60/60 (100%) | 59/60 (98%) | 29/30 (97%) | 30/30 (100%) | 0/60 (0%) | 0.000 | 20/20 (100%) | 0.5029 |
+| 20 | gpt-6-luna | 42/60 (70%) | 50/60 (83%) | 18/30 (60%) | 25/30 (83%) | 0/60 (0%) | 0.299 | 12/20 (60%) | 0.0245 |
+| 20 | majority class | 30/60 (50%) | 30/60 (50%) | – | – | – | – | 10/20 (50%) | 0 |
+| 60 | gpt-6-sol | 180/180 (100%) | 179/180 (99%) | 89/90 (99%) | 90/90 (100%) | 0/180 (0%) | 0.000 | 60/60 (100%) | 1.4570 |
+| 60 | gpt-6-luna | 141/180 (78%) | 157/180 (87%) | 65/90 (72%) | 84/90 (93%) | 0/180 (0%) | 0.216 | 41/60 (68%) | 0.0716 |
+| 60 | majority class | 90/180 (50%) | 90/180 (50%) | – | – | – | – | 30/60 (50%) | 0 |
 
-Most errors are the yes/no answer contradicting the model's own stated calculation, not
-mistakes about data vintages. The sample is small. See [results/PILOT.md](results/PILOT.md)
-for the setup, failure examples, findings and limitations.
+The set is not saturated: gpt-6-luna is below 90% on asof_correct and update_correct
+on both runs. gpt-6-sol is at the ceiling. Most errors are the yes/no answer
+contradicting the model's own stated calculation, not mistakes about data vintages.
+The samples are small (18 effective flip clusters). See
+[results/PILOT.md](results/PILOT.md) for:
+- the setup;
+- the pilot-20 vs new-40 split;
+- the cluster-level view;
+- the decision gate;
+- failure examples, findings and limitations.
 
 ## Data attribution
 
