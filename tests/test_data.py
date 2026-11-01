@@ -351,3 +351,87 @@ def test_real_2019_payroll_benchmark_revision_was_downward() -> None:
     after = data.get_as_of("EMPLOY", feb)[march_2019]
     assert after < before
     assert 300 < before - after < 700  # thousands; documented figure is about 500
+
+
+# --- per-vintage overrides and known release dates ----------------------------------------
+
+ROUTPUT_ROWS = [
+    ("DATE", "ROUTPUT19M1", "ROUTPUT19M2", "ROUTPUT19M3"),
+    ("2018:Q3", 5.0, 5.0, 5.0),
+    ("2018:Q4", "#N/A", 6.0, 6.0),
+]
+
+
+def test_override_dates_routput19m2_after_delayed_release() -> None:
+    df = data.wide_to_long(ROUTPUT_ROWS, "ROUTPUT")
+    dates = dict(zip(df["vintage"], df["vintage_date"], strict=False))
+    assert dates == {"ROUTPUT19M1": date(2019, 1, 15), "ROUTPUT19M2": date(2019, 2, 28),
+                     "ROUTPUT19M3": date(2019, 3, 15)}  # fmt: skip
+    assert fetch.check_known_releases(df, "ROUTPUT") == []
+    assert data.VINTAGE_DATE_OVERRIDES["ROUTPUT19M2"] == date(2019, 2, 28)
+
+
+def test_known_release_check_catches_mid_month_leak(monkeypatch) -> None:
+    monkeypatch.setattr(data, "VINTAGE_DATE_OVERRIDES", {})
+    df = data.wide_to_long(ROUTPUT_ROWS, "ROUTPUT")
+    problems = fetch.check_known_releases(df, "ROUTPUT")
+    assert len(problems) == 1 and problems[0].startswith("ROUTPUT19M2 (dated 2019-02-15)")
+    # The generic lag check alone cannot see this (Q4 ended 2 months before February).
+    assert fetch.check_release_lags(df, "ROUTPUT") == []
+
+
+def test_known_release_check_custom_table() -> None:
+    df = data.wide_to_long(_rows(), "EMPLOY")
+    known = {"EMPLOY": {date(2015, 12, 1): date(2016, 2, 5)}}
+    problems = fetch.check_known_releases(df, "EMPLOY", known)
+    assert problems and problems[0].startswith("EMPLOY16M1")  # dated 2016-01-31
+
+
+def test_override_must_keep_vintage_dates_increasing(monkeypatch) -> None:
+    monkeypatch.setattr(data, "VINTAGE_DATE_OVERRIDES", {"ROUTPUT19M2": date(2019, 3, 20)})
+    with pytest.raises(ValueError, match="increasing"):
+        data.wide_to_long(ROUTPUT_ROWS, "ROUTPUT")
+
+
+# --- period changes over the true previous period -----------------------------------------
+
+
+def test_previous_period_and_change() -> None:
+    assert data.previous_period(date(2016, 1, 1)) == date(2015, 12, 1)
+    assert data.previous_period(date(2016, 1, 1), 3) == date(2015, 10, 1)
+    col = pd.Series({date(2025, 9, 1): 100.0, date(2025, 11, 1): 110.0})
+    assert data.period_change(col, date(2025, 11, 1)) != data.period_change(col, date(2025, 11, 1))
+    col[date(2025, 10, 1)] = 100.0
+    assert data.period_change(col, date(2025, 11, 1)) == pytest.approx(10.0)
+
+
+def test_revision_summary_skips_change_over_missing_month(tmp_path: Path) -> None:
+    # 2015:11 is never published; 2015:12's change must not be taken against 2015:10.
+    rows = [
+        ("DATE", "PCPI15M12", "PCPI16M1", "PCPI16M2"),
+        ("2015:10", 100.0, 100.0, 100.0),
+        ("2015:11", "#N/A", "#N/A", "#N/A"),
+        ("2015:12", "#N/A", 102.0, 103.0),
+        ("2016:01", "#N/A", "#N/A", 104.0),
+    ]
+    data.restrict(data.wide_to_long(rows, "PCPI"), obs_start=date(2015, 10, 1)).to_parquet(
+        tmp_path / "PCPI.parquet"
+    )
+    s = data.revision_summary("PCPI", tmp_path)
+    assert s["n_compared"] == 2
+    # Only 2016:01 has a true previous period in both vintages; its first and latest
+    # change are the same (it is first released in the last vintage).
+    assert s["mean_abs_change_revision_pp"] == pytest.approx(0.0)
+
+
+HAVE_ROUTPUT = (data.RAW_DIR / "ROUTPUT.parquet").exists()
+
+
+@pytest.mark.skipif(not HAVE_ROUTPUT, reason="RTDSM data not fetched (scripts/fetch_data.py)")
+def test_real_vintage_dates_never_precede_known_releases() -> None:
+    labels = data.vintage_labels("ROUTPUT")
+    assert labels[date(2019, 2, 28)] == "ROUTPUT19M2"
+    assert date(2018, 10, 1) not in data.get_as_of("ROUTPUT", date(2019, 2, 27)).index
+    for sid in data.SERIES_IDS:
+        assert fetch.check_known_releases(data.load_vintages(sid), sid) == []
+        assert fetch.check_release_lags(data.load_vintages(sid), sid) == []
