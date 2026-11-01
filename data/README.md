@@ -52,6 +52,21 @@ stale.
 | IPT | last calendar day of the vintage month (conservative) | IP notes: "the day corresponding to the monthly vintages depends on the day the data are released"; "Over the period since 1962, the release dates have varied from the 12th to the 18th." |
 | PCPI | last calendar day of the vintage month (conservative) | PCPI specific notes: "Monthly vintages reflect the data available shortly after the U.S. Bureau of Labor Statistics (BLS) releases its monthly report on consumer prices." |
 
+### Per-vintage overrides
+
+`vintagebench.data.VINTAGE_DATE_OVERRIDES` lists vintages whose date departs from the
+series rule. RTDSM sometimes postpones collecting a vintage until a delayed release is
+out. Its first/second/third-release documentation says of the 2013 shutdown: "we
+decided to postpone our collection of the data until the new observations became
+available."
+
+| Vintage | Rule date | Override | Reason |
+|---|---|---|---|
+| ROUTPUT19M2 | 2019-02-15 | 2019-02-28 | It already contains 2018 Q4 GDP. RTDSM, "Documentation for first-, second-, and third-release values" (last updated 2026-05-21), section on the 2018 shutdown: "On February 28, 2019, the BEA published its first estimate for the 2018 Q4 GDP observation". ROUTPUT19M1 ends at 2018 Q3, and ROUTPUT19M3 has the same 2018 Q4 value. |
+
+Any task that used the rule date 2019-02-15 as an as-of date for ROUTPUT now gets
+ROUTPUT19M1, which has no 2018 Q4 value. Use 2019-02-28 instead.
+
 Why month-end for EMPLOY, IPT and PCPI:
 
 - RTDSM gives no fixed day for these three series.
@@ -72,7 +87,39 @@ Payrolls are usually out in the first week of the month, so for EMPLOY the as-of
 lags most. A model told "today is <month-end>" sees exactly what had been published by
 then, and nothing published later.
 
-Sanity checks run on every fetch (`check_release_lags`):
+Checks run on every fetch. Any failure aborts with a nonzero exit.
+
+`check_known_releases` compares every value against a table of known
+first-publication dates (`KNOWN_RELEASES` in `scripts/fetch_data.py`). No vintage may
+be dated before the publication of a value it contains.
+
+- ROUTPUT: the first estimate of every quarter from 2015 Q4 to 2026 Q1, including the
+  shutdown-affected releases:
+  - 2018 Q4: 2019-02-28;
+  - 2025 Q3: 2025-12-23 (no advance estimate);
+  - 2025 Q4: 2026-02-20;
+  - 2026 Q1: 2026-04-30.
+- EMPLOY, RUC and PCPI: the 2025 shutdown releases:
+  - September 2025 jobs report: 2025-11-20;
+  - October/November jobs report: 2025-12-16;
+  - September 2025 CPI: 2025-10-24;
+  - November 2025 CPI: 2025-12-18.
+- Sources of the dates:
+  - 2018 Q4 and 2026 Q1: quoted from the RTDSM documentation.
+  - All others: taken from the BEA and BLS release schedules. They could not be
+    re-fetched here, because bea.gov and bls.gov are blocked from the build environment,
+    so they should be re-verified.
+- How much accuracy the dates need:
+  - Normal-schedule dates only need to be right to within about two weeks, because the
+    vintage that first contains them is dated the 15th of the following month.
+  - The shutdown dates are the ones that matter.
+- Without the override, this check flags ROUTPUT19M2. With it, all five series pass.
+- IPT has no entries: the Federal Reserve Board's 2025 G.17 dates were not available
+  here. IPT25M10 and IPT25M11 add no new months, and the delayed months first appear in
+  IPT25M12, dated 2025-12-31. So month-end dating cannot be early unless a December
+  release was folded into an earlier vintage, and none was.
+
+`check_release_lags`:
 
 - In every pinned vintage of the monthly series, the last observation is for a month
   before the vintage month (RUC: before the quarter's middle month).
@@ -82,7 +129,8 @@ Sanity checks run on every fetch (`check_release_lags`):
 - All five series passed at the pin.
 - Shutdown-delayed releases appear where expected. RUC25Q4 ends in August 2025: the
   September report came out on November 20, after the 15th. ROUTPUT25M11 and
-  ROUTPUT25M12 end in 2025 Q2. 2025 Q3 first appears in ROUTPUT26M1.
+  ROUTPUT25M12 end in 2025 Q2. 2025 Q3 first appears in ROUTPUT26M1 (2026-01-15),
+  which is after 2025-12-23. 2025 Q4 first appears in ROUTPUT26M3 (2026-03-15).
 
 ## Variable mapping
 
@@ -179,7 +227,9 @@ local files. This section contains aggregate statistics only, never individual v
 - **Revision of period % change:** the period-over-period percent change at first
   release (both levels from the first-release vintage) compared with the latest
   change, in percentage points, not annualized. This measure is unaffected by
-  base-year changes.
+  base-year changes. The change is always taken over the true previous period. If that
+  period is missing, the observation is skipped: this applies to RUC and PCPI November
+  2025, because October 2025 was never published.
   - Level revisions for ROUTPUT (2012 to 2017 chained dollars, comprehensive update of
     2023) and IPT (index rebased in 2021) are dominated by rebasing. For those series
     the %-change column is the meaningful one.
@@ -191,6 +241,6 @@ local files. This section contains aggregate statistics only, never individual v
 | EMPLOY | 130 (EMPLOY15M12 (2015-12-31) to EMPLOY26M9 (2026-09-30)) | 140 (2015-01-01 to 2026-08-01) | 129 | 394.953 thousands of employees | 0.256% | 0.059 | 99% |
 | ROUTPUT | 131 (ROUTPUT15M12 (2015-12-15) to ROUTPUT26M10 (2026-10-15)) | 46 (2015-01-01 to 2026-04-01) | 43 | 1584.340 billions of real (chained) dollars | 8.613% | 0.227 | 100% |
 | IPT | 130 (IPT15M12 (2015-12-31) to IPT26M9 (2026-09-30)) | 140 (2015-01-01 to 2026-08-01) | 129 | 4.134 index | 3.930% | 0.342 | 97% |
-| RUC | 44 (RUC15Q4 (2015-11-15) to RUC26Q3 (2026-08-15)) | 138 (2015-01-01 to 2026-07-01) | 128 | 0.041 percent | 0.936% | 1.370 | 41% |
+| RUC | 44 (RUC15Q4 (2015-11-15) to RUC26Q3 (2026-08-15)) | 138 (2015-01-01 to 2026-07-01) | 128 | 0.041 percent | 0.936% | 1.381 | 41% |
 | PCPI | 130 (PCPI15M12 (2015-12-31) to PCPI26M9 (2026-09-30)) | 139 (2015-01-01 to 2026-08-01) | 128 | 0.180 index (base value 100) | 0.067% | 0.056 | 94% |
 <!-- stats:end -->

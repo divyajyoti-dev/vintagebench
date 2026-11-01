@@ -51,6 +51,70 @@ PAUSE = 3.0  # seconds between requests (polite, sequential)
 STATS_BEGIN, STATS_END = "<!-- stats:begin -->", "<!-- stats:end -->"
 
 
+# Known first-publication dates, used to check that no vintage_date precedes the
+# publication of a value in its vintage (check_known_releases). Sources:
+#   rtdsm: RTDSM "Documentation for first-, second-, and third-release values" (last
+#          updated 2026-05-21), shutdown sections; fetched 2026-11-01.
+#   bea / bls: the agencies' published release schedules (news-release dates). These
+#          were NOT re-fetched: bea.gov/bls.gov are blocked from the build sandbox, so
+#          they are entered from the published schedules and should be re-verified.
+#          Normal-schedule dates only need to be right to within about two weeks (the
+#          vintage containing them is dated the 15th of the following month); the
+#          shutdown-affected dates are the ones that matter.
+# ROUTPUT: first (advance/initial) estimate of each quarter.
+_ROUTPUT_FIRST = {
+    "2015-10": "2016-01-29", "2016-01": "2016-04-28", "2016-04": "2016-07-29",
+    "2016-07": "2016-10-28", "2016-10": "2017-01-27", "2017-01": "2017-04-28",
+    "2017-04": "2017-07-28", "2017-07": "2017-10-27", "2017-10": "2018-01-26",
+    "2018-01": "2018-04-27", "2018-04": "2018-07-27", "2018-07": "2018-10-26",
+    "2018-10": "2019-02-28",  # rtdsm: delayed by the 2018-19 shutdown
+    "2019-01": "2019-04-26", "2019-04": "2019-07-26", "2019-07": "2019-10-30",
+    "2019-10": "2020-01-30", "2020-01": "2020-04-29", "2020-04": "2020-07-30",
+    "2020-07": "2020-10-29", "2020-10": "2021-01-28", "2021-01": "2021-04-29",
+    "2021-04": "2021-07-29", "2021-07": "2021-10-28", "2021-10": "2022-01-27",
+    "2022-01": "2022-04-28", "2022-04": "2022-07-28", "2022-07": "2022-10-27",
+    "2022-10": "2023-01-26", "2023-01": "2023-04-27", "2023-04": "2023-07-27",
+    "2023-07": "2023-10-26", "2023-10": "2024-01-25", "2024-01": "2024-04-25",
+    "2024-04": "2024-07-25", "2024-07": "2024-10-30", "2024-10": "2025-01-30",
+    "2025-01": "2025-04-30", "2025-04": "2025-07-30",
+    "2025-07": "2025-12-23",  # bea: no advance estimate; delayed by the 2025 shutdown
+    "2025-10": "2026-02-20",  # bea: delayed (post-shutdown schedule)
+    "2026-01": "2026-04-30",  # rtdsm: "the 2026 Q1 observation on April 30, 2026"
+}  # fmt: skip
+KNOWN_RELEASES: dict[str, dict[date, date]] = {
+    "ROUTPUT": {
+        date.fromisoformat(o + "-01"): date.fromisoformat(r) for o, r in _ROUTPUT_FIRST.items()
+    },
+    # bls, 2025 shutdown: September 2025 Employment Situation on 2025-11-20; October
+    # (payrolls only) and November on 2025-12-16. CPI: September on 2025-10-24,
+    # November on 2025-12-18 (October 2025 CPI and unemployment rate never published).
+    "EMPLOY": {
+        date(2025, 9, 1): date(2025, 11, 20),
+        date(2025, 10, 1): date(2025, 12, 16),
+        date(2025, 11, 1): date(2025, 12, 16),
+    },
+    "RUC": {date(2025, 9, 1): date(2025, 11, 20), date(2025, 11, 1): date(2025, 12, 16)},
+    "PCPI": {date(2025, 9, 1): date(2025, 10, 24), date(2025, 11, 1): date(2025, 12, 18)},
+}
+
+
+def check_known_releases(
+    df: pd.DataFrame, series_id: str, known: dict[str, dict[date, date]] | None = None
+) -> list[str]:
+    """Problems where a vintage contains a value dated (vintage_date) before its known
+    first publication: a leak. Empty list = OK."""
+    table = (KNOWN_RELEASES if known is None else known).get(series_id, {})
+    problems = []
+    for row in df.itertuples(index=False):
+        published = table.get(row.observation_date)
+        if published is not None and row.vintage_date < published:
+            problems.append(
+                f"{row.vintage} (dated {row.vintage_date}) contains {row.observation_date}, "
+                f"first published {published}"
+            )
+    return problems
+
+
 class VerificationError(RuntimeError):
     """Parsed content differs from data/checksums.json."""
 
@@ -142,9 +206,9 @@ def build_table(series_id: str, raw: Path, pin: str | None) -> tuple[pd.DataFram
     if pin is None:
         pin = full.sort_values("vintage_date")["vintage"].iloc[-1]
     table = data.restrict(full, last_vintage=pin)
-    problems = check_release_lags(table, series_id)
+    problems = check_release_lags(table, series_id) + check_known_releases(table, series_id)
     if problems:
-        raise VerificationError(f"{series_id}: release-lag check failed: {problems[:5]}")
+        raise VerificationError(f"{series_id}: release-date check failed: {problems[:5]}")
     return table, pin
 
 
@@ -281,7 +345,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"wrote {args.checksums} and {args.manifest}")
     if args.update_checksums or args.readme:
         readme = args.manifest.parent / "README.md"
-        write_readme_stats(readme, stats_table(args.series, raw))
+        have = [s for s in data.SERIES_IDS if (raw / f"{s}.parquet").exists()]
+        write_readme_stats(readme, stats_table(have, raw))
         print(f"updated statistics in {readme}")
     return 0
 

@@ -30,7 +30,7 @@
     "vintages": 130
   },
   "ROUTPUT": {
-    "canonical_sha256": "8fd7fded4b4ad0c1af22e4a2d3f8bf9ec94c12bbe66d88577e0d4f3640787f1a",
+    "canonical_sha256": "6525ae90f7718de17b364731582460bae44fdc823bc8263d30c189698ced5f3f",
     "first_vintage": "ROUTPUT15M12",
     "last_vintage": "ROUTPUT26M10",
     "observations": 46,

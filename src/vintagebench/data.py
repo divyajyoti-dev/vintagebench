@@ -32,6 +32,8 @@ vintage, so serving the vintage on its vintage_date never leaks later data. Rule
   RTDSM gives no fixed day ("depends on the day that the data are released"), and in
   2025 a CPI release on the 24th appears in that month's vintage, so a fixed mid-month
   day would leak; month-end is the conservative choice.
+- Documented per-vintage exceptions are in :data:`VINTAGE_DATE_OVERRIDES` (e.g.
+  ROUTPUT19M2 -> 2019-02-28, the delayed post-shutdown GDP release).
 
 Date convention: ``observation_date`` and ``vintage_date`` are ``datetime.date``
 (object dtype), never Timestamps; ``as_of`` arguments may be a date, datetime,
@@ -124,6 +126,18 @@ SERIES: dict[str, SeriesInfo] = {
     )
 }  # fmt: skip
 SERIES_IDS: tuple[str, ...] = tuple(SERIES)
+
+# Per-vintage exceptions to the series rule, where RTDSM postponed collecting a vintage
+# until a delayed release came out. Each must be on or after the publication of every
+# value in the vintage (checked against known release dates by scripts/fetch_data.py).
+VINTAGE_DATE_OVERRIDES: dict[str, date] = {
+    # 2018-19 shutdown: BEA's first 2018 Q4 GDP estimate was published 2019-02-28 and
+    # RTDSM placed it in ROUTPUT19M2 (RTDSM, "Documentation for first-, second-, and
+    # third-release values", section "Federal Government Shutdown in 2018": "On
+    # February 28, 2019, the BEA published its first estimate for the 2018 Q4 GDP
+    # observation"). The mid-month rule would date it 2019-02-15, a leak.
+    "ROUTPUT19M2": date(2019, 2, 28),
+}
 
 _LABEL = re.compile(r"^([A-Z]+)(\d{2})([MQ])(\d{1,2})$")
 _OBS = re.compile(r"^(\d{4}):(Q?)(\d{1,2})$")
@@ -218,7 +232,9 @@ def wide_to_long(rows: list[tuple], series_id: str, rule: str | None = None) -> 
         m = _LABEL.match(lab)
         if not m or m[1] != series_id:
             raise ValueError(f"{series_id}: unexpected vintage column {lab!r}")
-    vdates = [vintage_date(lab, rule) for lab in labels]
+    vdates = [VINTAGE_DATE_OVERRIDES.get(lab) or vintage_date(lab, rule) for lab in labels]
+    if vdates != sorted(vdates) or len(set(vdates)) != len(vdates):
+        raise ValueError(f"{series_id}: vintage dates are not strictly increasing")
     out: list[tuple] = []
     for row in rows[1:]:
         if row[0] is None or str(row[0]).strip() == "":
@@ -410,6 +426,28 @@ def latest_value(series_id: str, obs: object, root: Path | str = RAW_DIR) -> flo
 # --- aggregate statistics for data/README.md --------------------------------------------
 
 
+def _period_months(series_id: str, index: list[date]) -> int:
+    """3 for quarterly observations, else 1 (inferred for series not in SERIES)."""
+    if series_id in SERIES:
+        return 3 if SERIES[series_id].frequency == "quarterly" else 1
+    return 3 if index and all(d.month in (1, 4, 7, 10) for d in index) else 1
+
+
+def previous_period(obs: date, months: int = 1) -> date:
+    """First day of the period ``months`` before ``obs`` (1 = month, 3 = quarter)."""
+    idx = obs.year * 12 + obs.month - 1 - months
+    return date(idx // 12, idx % 12 + 1, 1)
+
+
+def period_change(column: pd.Series, obs: date, months: int = 1) -> float:
+    """Percent change of ``obs`` over the true previous period within one vintage
+    column; NaN if either period is missing (never the previous *row*)."""
+    prev = previous_period(obs, months)
+    if obs not in column.index or prev not in column.index:
+        return float("nan")
+    return float((column[obs] / column[prev] - 1) * 100)
+
+
 def revision_summary(series_id: str, root: Path | str = RAW_DIR) -> dict[str, object]:
     """Aggregate revision statistics (no individual values).
 
@@ -418,7 +456,9 @@ def revision_summary(series_id: str, root: Path | str = RAW_DIR) -> dict[str, ob
     units; ``mean_abs_revision_pct`` is that relative to |first| (percent);
     ``mean_abs_change_revision_pp`` compares the period-over-period percent change at
     first release (both levels from the first-release vintage) with the latest one,
-    which is unaffected by base-year changes.
+    which is unaffected by base-year changes. Changes are taken over the true previous
+    period (:func:`period_change`); observations whose previous period is missing
+    (e.g. RUC/PCPI November 2025, since October 2025 was never published) are skipped.
     """
     df = load_vintages(series_id, root)
     vds = sorted(set(df["vintage_date"]))
@@ -433,15 +473,13 @@ def revision_summary(series_id: str, root: Path | str = RAW_DIR) -> dict[str, ob
         {o: abs(latest[o] - first_val[o]) / abs(first_val[o]) * 100 for o in released},
         dtype="float64",
     )
-    latest_chg = latest.pct_change() * 100
+    step = _period_months(series_id, list(latest.index))
     chg_rev = {}
     for o in released:
-        col = _column(df, first_vd[o], series_id)
-        pos = col.index.get_loc(o)
-        if pos > 0 and o in latest_chg.index:
-            first_chg = (col.iloc[pos] / col.iloc[pos - 1] - 1) * 100
-            if latest_chg[o] == latest_chg[o]:
-                chg_rev[o] = abs(first_chg - latest_chg[o])
+        first_chg = period_change(_column(df, first_vd[o], series_id), o, step)
+        latest_chg = period_change(latest, o, step)
+        if first_chg == first_chg and latest_chg == latest_chg:  # both non-NaN
+            chg_rev[o] = abs(first_chg - latest_chg)
     labels = df.drop_duplicates("vintage_date")
     return {
         "series_id": series_id,
