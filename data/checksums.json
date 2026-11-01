@@ -1,0 +1,52 @@
+{
+  "EMPLOY": {
+    "canonical_sha256": "cf9b3c648ad01e269837929a4e019e6fff284aa6ae2ca6995485adfb55990595",
+    "first_vintage": "EMPLOY15M12",
+    "last_vintage": "EMPLOY26M9",
+    "observations": 140,
+    "raw_file_bytes_at_pin": 2233651,
+    "raw_file_sha256_at_pin": "a5cab543e1dcd135a2339b10ce0d6d920d23ad5a43c35cc97eca678914dd4fef",
+    "rows": 9813,
+    "vintages": 130
+  },
+  "IPT": {
+    "canonical_sha256": "94a2c22e05b3f2b16f03a60defd5e776bf23e36ef81028e237b2799d4bffa4c3",
+    "first_vintage": "IPT15M12",
+    "last_vintage": "IPT26M9",
+    "observations": 140,
+    "raw_file_bytes_at_pin": 2863459,
+    "raw_file_sha256_at_pin": "89ac73de4144749bf8ef2ce47314da8448ecb235f7f369c32465be1588ea5a97",
+    "rows": 9812,
+    "vintages": 130
+  },
+  "PCPI": {
+    "canonical_sha256": "a9b0695c05e8cc7df40127703d8284ce525dc3579bdd52213f9dfc26c57667d2",
+    "first_vintage": "PCPI15M12",
+    "last_vintage": "PCPI26M9",
+    "observations": 139,
+    "raw_file_bytes_at_pin": 826467,
+    "raw_file_sha256_at_pin": "fe5bd5067445cbeacb33629884900b602e69f83552283d99df2eff545ca9b8e4",
+    "rows": 9804,
+    "vintages": 130
+  },
+  "ROUTPUT": {
+    "canonical_sha256": "8fd7fded4b4ad0c1af22e4a2d3f8bf9ec94c12bbe66d88577e0d4f3640787f1a",
+    "first_vintage": "ROUTPUT15M12",
+    "last_vintage": "ROUTPUT26M10",
+    "observations": 46,
+    "raw_file_bytes_at_pin": 697670,
+    "raw_file_sha256_at_pin": "2be1c0f4f902df478adbc429c73fadfe6c76e5a85d28405c1a9877c2087233f6",
+    "rows": 3228,
+    "vintages": 131
+  },
+  "RUC": {
+    "canonical_sha256": "5eaecbaf297116eb77790a95d59b861ac9736e08b566db434b26ced832ba3a47",
+    "first_vintage": "RUC15Q4",
+    "last_vintage": "RUC26Q3",
+    "observations": 138,
+    "raw_file_bytes_at_pin": 575288,
+    "raw_file_sha256_at_pin": "d971e59d3ed5f1322a46631743508fb1ad5eee39bfbe12425a641a277fdd9b9a",
+    "rows": 3273,
+    "vintages": 44
+  }
+}

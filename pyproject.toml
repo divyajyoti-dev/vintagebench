@@ -12,7 +12,7 @@ dependencies = [
     "pandas",
     "pyarrow",
     "requests",
-    "fredapi",
+    "openpyxl",
     "openai",
     "pyyaml",
 ]

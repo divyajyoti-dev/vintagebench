@@ -9,15 +9,8 @@ import os
 import sys
 from collections.abc import Callable
 
-KEYS = ("FRED_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY")
+KEYS = ("OPENAI_API_KEY", "TOGETHER_API_KEY")  # RTDSM data need no key
 TOGETHER_BASE_URL = "https://api.together.xyz/v1"
-
-
-def check_fred() -> str:
-    from fredapi import Fred
-
-    info = Fred(api_key=os.environ["FRED_API_KEY"]).get_series_info("PAYEMS")
-    return f"PAYEMS: {info['title']}"
 
 
 def _list_models(base_url: str | None, key_var: str) -> str:
@@ -52,7 +45,6 @@ def main() -> int:
         print(f"{'OK  ' if present else 'FAIL'} env {key} {'set' if present else 'missing'}")
 
     checks: dict[str, tuple[str, Callable[[], str]]] = {
-        "FRED series info": ("FRED_API_KEY", check_fred),
         "OpenAI list models": ("OPENAI_API_KEY", check_openai),
         "Together list models": ("TOGETHER_API_KEY", check_together),
     }

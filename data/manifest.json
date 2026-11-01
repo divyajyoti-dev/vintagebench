@@ -1,0 +1,53 @@
+{
+  "obs_start": "2015-01-01",
+  "pinned_on": "2026-11-01",
+  "series": {
+    "EMPLOY": {
+      "file": "employMvMd.xlsx",
+      "first_vintage": "EMPLOY15M12",
+      "first_vintage_date": "2015-12-31",
+      "last_vintage": "EMPLOY26M9",
+      "last_vintage_date": "2026-09-30",
+      "url": "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/employMvMd.xlsx",
+      "vintage_rule": "month_end"
+    },
+    "IPT": {
+      "file": "iptMvMd.xlsx",
+      "first_vintage": "IPT15M12",
+      "first_vintage_date": "2015-12-31",
+      "last_vintage": "IPT26M9",
+      "last_vintage_date": "2026-09-30",
+      "url": "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/iptMvMd.xlsx",
+      "vintage_rule": "month_end"
+    },
+    "PCPI": {
+      "file": "pcpiMvMd.xlsx",
+      "first_vintage": "PCPI15M12",
+      "first_vintage_date": "2015-12-31",
+      "last_vintage": "PCPI26M9",
+      "last_vintage_date": "2026-09-30",
+      "url": "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/pcpiMvMd.xlsx",
+      "vintage_rule": "month_end"
+    },
+    "ROUTPUT": {
+      "file": "routputMvQd.xlsx",
+      "first_vintage": "ROUTPUT15M12",
+      "first_vintage_date": "2015-12-15",
+      "last_vintage": "ROUTPUT26M10",
+      "last_vintage_date": "2026-10-15",
+      "url": "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/routputMvQd.xlsx",
+      "vintage_rule": "mid_month"
+    },
+    "RUC": {
+      "file": "rucQvMd.xlsx",
+      "first_vintage": "RUC15Q4",
+      "first_vintage_date": "2015-11-15",
+      "last_vintage": "RUC26Q3",
+      "last_vintage_date": "2026-08-15",
+      "url": "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/rucQvMd.xlsx",
+      "vintage_rule": "mid_quarter"
+    }
+  },
+  "source": "Federal Reserve Bank of Philadelphia, Real-Time Data Set for Macroeconomists",
+  "vintage_start": "2016-01-01"
+}
