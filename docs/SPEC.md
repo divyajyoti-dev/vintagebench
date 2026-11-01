@@ -75,7 +75,14 @@ Can an AI analyst reason correctly about provisional data that later gets revise
   2018 Q4?"). Conventions used for gold (documented in tasks/README.md): GDP growth =
   annualized quarter-over-quarter percent change of the level; payroll change = level
   difference in thousands; IP fell = month-over-month level decline; inflation =
-  12-month percent change of CPI; unemployment rose = month-over-month increase.
+  12-month percent change of CPI (seasonally adjusted index, as in RTDSM); CPI monthly
+  change = one-month percent change (template added because 12-month CPI conclusions
+  essentially never flip); unemployment rose = month-over-month increase of the rate
+  at its published 0.1 precision.
+- Periods 2016-2025 whose first release is after the baseline vintage; as_of_date =
+  first vintage containing the period. flip/control revision_date = pinned latest
+  vintage; no_change revision_date = last vintage of the unbroken run of vintages with
+  an identical computation window.
 - Gold answers computed programmatically from the two vintages; never hand-labeled;
   every gold function has a unit test.
 - Selection (select_v1(candidates, seed=0)): 45 tasks = 20 flips, 20 controls,
@@ -154,8 +161,12 @@ runs/<timestamp>/results.jsonl (local only) + summary.md (aggregates only).
 ## 5. Interfaces (src/vintagebench/)
 - data.py: §2.1
 - tasks.py: dataclass Task (fields per §3 plus computed gold_as_of, gold_revised,
-  flips); build_candidates(series_ids, root); select_v1(candidates, seed=0);
-  base_rates(candidates, root); save_tasks(path, tasks); load_tasks(path, root)
+  flips, margin_as_of, margin_revised); build_candidates(series_ids, root);
+  select_v1(candidates, seed=0); base_rates(candidates, root); save_tasks(path, tasks);
+  load_tasks(path, root); for the harness: implied_answer(task, values) -> bool | None,
+  key_observations(task) -> list[date], computation_window(task) -> tuple[date, ...],
+  task_clusters(tasks) -> dict[id, label]. CLI: python -m vintagebench.tasks --build |
+  --base-rates
 - models.py: ModelSpec(provider, model_id, price_in, price_out, native_tools,
   reasoning_effort, name); ModelResponse; complete(spec, messages, tools)
 - episode.py: run_episode(task, agent, trial, root) -> EpisodeRecord;
