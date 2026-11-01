@@ -9,4 +9,4 @@ max_tokens: 2048      # default max output tokens per call; models.yaml may over
 projection_threshold_usd: 8
 fallback_trials: 2
 fallback_drop:
-  - gpt-6-sol/reasoning-low
+  - gpt-6-sol/reasoning-medium
