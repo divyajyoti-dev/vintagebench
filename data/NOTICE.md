@@ -1,111 +1,100 @@
 # Data notice
 
-The files in `data/vintages/` hold real-time (vintage) observations of five US economic
-series. Quantities derived from these files appear in `tasks/` (growth rates and
-margin distances in task notes; questions contain only round thresholds), in `runs/` (in tool responses inside the cached model prompts and in
-`values_used`), and in `results/PILOT.md`.
+VintageBench uses the **Real-Time Data Set for Macroeconomists (RTDSM)** of the Federal
+Reserve Bank of Philadelphia. **This repository contains no RTDSM data.** Users download
+the files themselves with `python scripts/fetch_data.py`, which stores them in
+`data/raw/` (gitignored) and checks them against `data/checksums.json`. That file holds
+only SHA-256 hashes and counts, never data values.
 
 The MIT License in [LICENSE](../LICENSE) covers the VintageBench code only. It does not
-cover these data. The data remain subject to the terms of FRED®/ALFRED® and of the
-original source agencies, described below.
+cover the RTDSM data or the underlying agency data.
 
-## Series
+## Source
 
-The copyright status is the FRED® copyright tag of each series, checked through the
-FRED® API (`fred/series/tags`) on 2026-10-31. None of the five series mentions a
-copyright in its FRED® notes.
+- Federal Reserve Bank of Philadelphia, Real-Time Data Set for Macroeconomists,
+  https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/real-time-data-set-for-macroeconomists
+- Variables (files and variable pages are listed in [README.md](README.md)): EMPLOY
+  (nonfarm payroll employment), ROUTPUT (real GDP), IPT (industrial production index,
+  total), RUC (civilian unemployment rate), PCPI (consumer price index, monthly vintages).
+- Original sources, per the RTDSM documentation: U.S. Bureau of Labor Statistics
+  (EMPLOY, RUC, PCPI), U.S. Bureau of Economic Analysis (ROUTPUT), and the Board of
+  Governors of the Federal Reserve System (IPT, from the G.17 release).
+- Accessed 2026-11-01. The pinned vintage range is in `data/manifest.json`.
 
-| Series | Title | Source agency | FRED® copyright tag |
-|---|---|---|---|
-| PAYEMS | All Employees, Total Nonfarm | U.S. Bureau of Labor Statistics (Current Employment Statistics) | Public Domain: Citation Requested |
-| UNRATE | Unemployment Rate | U.S. Bureau of Labor Statistics (Current Population Survey) | Public Domain: Citation Requested |
-| GDPC1 | Real Gross Domestic Product | U.S. Bureau of Economic Analysis | Public Domain: Citation Requested |
-| PCEPI | Personal Consumption Expenditures: Chain-type Price Index | U.S. Bureau of Economic Analysis | Public Domain: Citation Requested |
-| INDPRO | Industrial Production: Total Index | Board of Governors of the Federal Reserve System (US) | Public Domain: Citation Requested |
+## Terms of use (quoted verbatim, accessed 2026-11-01)
 
-Some FRED® series are copyrighted by third parties. Before adding a series, check its
-copyright tag and notes.
+The RTDSM pages fall under the Philadelphia Fed's "Online Terms of Use and Privacy
+Notice", https://www.philadelphiafed.org/about-us/privacy-notice:
 
-## Retrieval
+- Scope: "By using this website or the information, materials, or other content
+  available on or through it, you agree that such use is governed by the following
+  terms, which include our privacy policy. We reserve the right to change these terms
+  without notice."
+- Appropriate Use: "The content provided on this website may be used for
+  informational, educational, and research purposes only."
+- "Some of the content on this website may be copyrighted. Permission to use such
+  copyrighted material must be obtained from the owner."
+- "We do not permit the use of our name in any advertising, as an endorsement for any
+  product or service, or for any other commercial purpose."
+- "You may not access this website in a manner that could interfere with or disrupt the
+  site. Without limiting the foregoing, you may not engage in excessive access to the
+  website in a way that could adversely affect the site for others. We reserve the
+  right to restrict such activity in our discretion."
+- Disclaimer: "We assume no liability or responsibility for the accuracy, correctness,
+  completeness, or timeliness of any content available on or through this website, nor
+  do we represent that the use of such content will not infringe privately held
+  rights. All content available on or through this website is provided on an “as is,”
+  “as available” basis."
 
-- **Source:** ALFRED® (ArchivaL Federal Reserve Economic Data), Federal Reserve Bank of
-  St. Louis, https://alfred.stlouisfed.org/, accessed through the FRED® API
-  (`fred/series/vintagedates` and `fred/series/observations` with `realtime_start` /
-  `realtime_end`) by `scripts/fetch_data.py`.
-- **Retrieved:** 2026-10-30 (the date `data/vintages/` was committed; the files have not been refetched since).
-- **Coverage:** observations from 2015-01-01. Vintages from the baseline release on or
-  before 2016-01-01 through the latest release available at retrieval:
+The RTDSM page itself
+(https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/real-time-data-set-for-macroeconomists)
+says: "The real-time data set consists of vintages, or snapshots, of time series of
+major macroeconomic variables. The data set may be used by macroeconomic researchers to
+verify empirical results, to analyze policy, or to forecast. All data are updated at
+the end of each month."
 
-  | Series | First vintage | Last vintage |
-  |---|---|---|
-  | PAYEMS | 2015-12-04 | 2026-10-02 |
-  | UNRATE | 2015-12-04 | 2026-10-02 |
-  | GDPC1 | 2015-12-22 | 2026-10-29 |
-  | PCEPI | 2015-12-23 | 2026-10-29 |
-  | INDPRO | 2015-12-16 | 2026-10-16 |
+### What this means for VintageBench
 
-- **Processing:** stored sparsely, like ALFRED®: one row for an observation's first
-  release and one for each later vintage in which its value changed. Missing values
-  (".") are dropped. Values are otherwise as published. See [README.md](README.md) for
-  the schema and summary statistics.
+- **Allowed:** use for informational, educational and research purposes. VintageBench
+  is a non-commercial research benchmark that evaluates AI models. We read that as a
+  research purpose. The terms do not mention AI or machine-learning use at all, either
+  to allow it or to forbid it.
+- **Redistribution:** none of the pages we read grants permission to redistribute. The
+  terms also warn that some content "may be copyrighted". So VintageBench does not
+  redistribute: no xlsx, parquet or data values are committed (SPEC §2.3). Tasks store
+  only definitions. Golds are computed locally from the user's own download. Committed
+  results are aggregate metrics only.
+- **No endorsement:** the Federal Reserve Bank of Philadelphia, BLS, BEA and the
+  Federal Reserve Board do not sponsor or endorse VintageBench and are not affiliated
+  with it. Their names are used only to attribute the data. The data are used "as is",
+  with no warranty of accuracy, completeness or timeliness.
+- **Polite access:** `scripts/fetch_data.py` downloads five files one after another,
+  with pauses, a timeout and a few retries. It identifies itself with a VintageBench
+  User-Agent and does not download again if the files are already present.
 
-## FRED® notice and terms
+## Citation
 
-This product uses the FRED® API but is not endorsed or certified by the Federal Reserve
-Bank of St. Louis.
+Following the RTDSM page ("This is the preferred article to cite for technical journal
+articles"):
 
-Use of these data is subject to the FRED® API Terms of Use,
-https://fred.stlouisfed.org/docs/api/terms_of_use.html, and the FRED® terms of use on
-the legal page, https://fred.stlouisfed.org/legal. By using the data you agree to those
-terms.
+- Croushore, Dean, and Tom Stark. "A Real-Time Data Set for Macroeconomists." *Journal
+  of Econometrics* 105 (November 2001), pp. 111-130.
 
-Neither the Federal Reserve Bank of St. Louis nor the U.S. Bureau of Labor Statistics,
-the U.S. Bureau of Economic Analysis or the Board of Governors of the Federal Reserve
-System sponsors, endorses or is affiliated with VintageBench. The data are provided as
-retrieved, without warranty of any kind, including as to accuracy, completeness or
-timeliness. Later vintages may differ from the ones stored here.
+Dataset citation (our format; the Philadelphia Fed does not specify one):
 
-## Open question before public release
+- Federal Reserve Bank of Philadelphia. Real-Time Data Set for Macroeconomists:
+  EMPLOY, ROUTPUT, IPT, RUC and PCPI, vintages from December 2015 (RUC: 2015 Q4)
+  through the pinned vintages in `data/manifest.json`. Accessed November 1, 2026.
+  https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/real-time-data-set-for-macroeconomists
 
-**Not yet resolved.** The FRED® API Terms of Use reportedly prohibit using the API "in
-connection with storing, caching, or archiving" any portion of FRED® content, and
-providing such stored content to third parties. This repository commits API-retrieved
-vintages in `data/vintages/*.parquet`, and data values derived from them in `tasks/`
-and `runs/`. The wording above comes from secondary sources. It was not verified against
-the primary terms page, which could not be reached when this notice was written. Before
-the repository is made public, the maintainer should either confirm from the current
-FRED® API Terms of Use (or with the Federal Reserve Bank of St. Louis) that publishing
-these files is permitted, or obtain the vintages from the original agencies (BLS, BEA
-and the Federal Reserve Board), whose data are in the public domain, and publish those
-instead of the committed parquet files.
+Please also credit the original agencies: U.S. Bureau of Labor Statistics, U.S. Bureau
+of Economic Analysis, and Board of Governors of the Federal Reserve System.
 
-A second clause should be checked at the same time. Secondary sources report that the
-FRED® terms (as updated in 2024) restrict use of FRED® content "in connection with the
-development or training of any software program or system or machine learning".
-VintageBench evaluates models and does not train them, but this has not been confirmed
-against the primary terms either.
+## Why not FRED/ALFRED
 
-## Suggested citations
-
-Following FRED®'s citation style (source, title, series ID, "retrieved from", link,
-access date), adapted for ALFRED® vintages:
-
-- U.S. Bureau of Labor Statistics, All Employees, Total Nonfarm [PAYEMS], vintages
-  2015-12-04 to 2026-10-02, retrieved from ALFRED, Federal Reserve Bank of St. Louis;
-  https://alfred.stlouisfed.org/series?seid=PAYEMS, October 30, 2026.
-- U.S. Bureau of Labor Statistics, Unemployment Rate [UNRATE], vintages 2015-12-04 to
-  2026-10-02, retrieved from ALFRED, Federal Reserve Bank of St. Louis;
-  https://alfred.stlouisfed.org/series?seid=UNRATE, October 30, 2026.
-- U.S. Bureau of Economic Analysis, Real Gross Domestic Product [GDPC1], vintages
-  2015-12-22 to 2026-10-29, retrieved from ALFRED, Federal Reserve Bank of St. Louis;
-  https://alfred.stlouisfed.org/series?seid=GDPC1, October 30, 2026.
-- U.S. Bureau of Economic Analysis, Personal Consumption Expenditures: Chain-type Price
-  Index [PCEPI], vintages 2015-12-23 to 2026-10-29, retrieved from ALFRED, Federal
-  Reserve Bank of St. Louis; https://alfred.stlouisfed.org/series?seid=PCEPI,
-  October 30, 2026.
-- Board of Governors of the Federal Reserve System (US), Industrial Production: Total
-  Index [INDPRO], vintages 2015-12-16 to 2026-10-16, retrieved from ALFRED, Federal
-  Reserve Bank of St. Louis; https://alfred.stlouisfed.org/series?seid=INDPRO,
-  October 30, 2026.
-
-The vintage-range form is an adaptation; ALFRED® publishes no specific citation format.
+VintageBench v0 used vintages from ALFRED (Federal Reserve Bank of St. Louis), obtained
+through the FRED API, and committed them to the repository. The FRED terms forbid
+storing or caching FRED content and forbid using the API in connection with
+machine-learning or LLM development. v1 therefore removed all FRED-derived data, the
+v0 tasks that contained values, and the run caches, and moved to RTDSM. No FRED data
+or FRED API code remains (SPEC §8).
