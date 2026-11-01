@@ -255,6 +255,36 @@ def test_weakest_key_observations() -> None:
     assert len(obs) == 13 and obs[0] == D(2018, 5, 1) and obs[-1] == D(2019, 5, 1)
 
 
+def test_readme_labels() -> None:
+    tp = tasks.TEMPLATES
+    assert tasks.key_observations_label(tp["payroll_avg3m_above"]) == "t-3, t"
+    assert tasks.window_label(tp["payroll_avg3m_above"]) == "t-3..t (4 months)"
+    assert tasks.key_observations_label(tp["payroll_weakest_12m"]) == "t-12..t (13 obs)"
+    assert tasks.key_observations_label(tp["gdp_shrink"]) == "q-1, q"
+    assert tasks.window_label(tp["gdp_shrink"]) == "q-1..q (2 quarters)"
+    assert tasks.window_label(tp["cpi_12m_above"]) == "t-12..t (13 months)"
+
+
+def test_rounding_boundary_flips() -> None:
+    def ruc(kind: str, d1: float, d2: float, period: str = "2019-03-01") -> Task:
+        return replace(
+            _task("unemployment_rose", period, kind=kind),
+            id=f"{kind}{d1}{d2}",
+            margin_as_of=d1,
+            margin_revised=d2,
+        )
+
+    rows = [
+        ruc("flip", -0.05, 0.05),  # unchanged -> +0.1: boundary
+        ruc("flip", 0.05, -0.05),  # +0.1 -> unchanged: boundary
+        ruc("flip", 0.15, -0.05),  # +0.2 -> unchanged: not boundary
+        ruc("flip", -0.15, 0.05),  # -0.1 -> +0.1: not boundary
+        ruc("control", -0.05, -0.05),  # not a flip
+        _task("ip_fell", "2019-03-01", kind="flip"),  # other template
+    ]
+    assert tasks.rounding_boundary_flips(rows) == (2, 4)
+
+
 def test_implied_answer() -> None:
     t = _task("ip_fell", "2019-02-01")
     assert tasks.implied_answer(t, {D(2019, 1, 1): 100.0, D(2019, 2, 1): 99.5}) is True
