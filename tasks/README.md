@@ -14,16 +14,22 @@ Questions state the question in plain words and intentionally do not spell out
 the formula; the gold answer uses these conventions (SPEC §3). All quantities are
 computed within one vintage, unrounded unless stated; ties count as No.
 
-| template | series | example question | thresholds | gold (deciding quantity) | materiality margin | control cap | key observations |
-|---|---|---|---|---|---|---|---|
-| gdp_shrink | ROUTPUT | Did US real GDP shrink in 2019 Q2? | 0 | annualized quarter-over-quarter % change of the real GDP level; Yes iff below 0 (the level fell) | 0.05 pp (half the 0.1 pp unit of published annualized growth) | 1 pp | q-1, q |
-| gdp_growth_above | ROUTPUT | Did US real GDP grow faster than a 2% annual rate in 2019 Q2? | 2 | annualized quarter-over-quarter % change of the real GDP level; Yes iff above the threshold | 0.05 pp | 1 pp | q-1, q |
-| payroll_weakest_12m | EMPLOY | Was May 2019 the weakest month for US job growth (nonfarm payrolls) in the 12 months through May 2019? | 0 | payroll change in the month (level difference, thousands) minus the smallest change of the 11 preceding months; Yes iff below 0 | 0.5 thousand (half the published 1 thousand unit) | 35 thousand | t-12, t (13 obs) |
-| payroll_avg3m_above | EMPLOY | Did US employers add more than 150,000 jobs a month on average (nonfarm payrolls) in the three months through May 2019? | 100, 150 | (level(t) - level(t-3)) / 3 in thousands; Yes iff above the threshold | 0.5 thousand | 35 thousand | t-3, t |
-| ip_fell | IPT | Did US industrial production fall in May 2019? | 0 | month-over-month % change of the IP index; Yes iff below 0 (the level fell) | 0.05 pp (half the published 0.1% unit) | 0.3 pp | t-1, t |
-| cpi_12m_above | PCPI | Was US consumer price inflation (CPI) above 3% over the 12 months through May 2019? | 2, 2.5, 3 | 12-month % change of the seasonally adjusted CPI index; Yes iff above the threshold | 0.05 pp (half the published 0.1 pp unit) | 0.25 pp | t-12, t |
-| cpi_1m_above | PCPI | Did US consumer prices (CPI) rise by more than 0.3% in May 2019? | 0.2, 0.3 | month-over-month % change of the seasonally adjusted CPI index; Yes iff above the threshold | 0.05 pp | 0.1 pp | t-1, t |
-| unemployment_rose | RUC | Did the US unemployment rate rise in May 2019? | 0 | month-over-month change of the rate rounded to its published 0.1 pp; Yes iff it rose (by at least 0.1); unchanged is No. The distance is measured from 0.05, midway between unchanged and +0.1 | 0.05 pp (always met: changes are multiples of 0.1) | 0.15 pp | t-1, t |
+| template | series | example question | thresholds | gold (deciding quantity) | materiality margin | control cap | key observations | computation window |
+|---|---|---|---|---|---|---|---|---|
+| gdp_shrink | ROUTPUT | Did US real GDP shrink in 2019 Q2? | 0 | annualized quarter-over-quarter % change of the real GDP level; Yes iff below 0 (the level fell) | 0.05 pp (half the 0.1 pp unit of published annualized growth) | 1 pp | q-1, q | q-1..q (2 quarters) |
+| gdp_growth_above | ROUTPUT | Did US real GDP grow faster than a 2% annual rate in 2019 Q2? | 2 | annualized quarter-over-quarter % change of the real GDP level; Yes iff above the threshold | 0.05 pp | 1 pp | q-1, q | q-1..q (2 quarters) |
+| payroll_weakest_12m | EMPLOY | Was May 2019 the weakest month for US job growth (nonfarm payrolls) in the 12 months through May 2019? | 0 | payroll change in the month (level difference, thousands) minus the smallest change of the 11 preceding months; Yes iff below 0 | 0.5 thousand (half the published 1 thousand unit) | 35 thousand | t-12..t (13 obs) | t-12..t (13 months) |
+| payroll_avg3m_above | EMPLOY | Did US employers add more than 150,000 jobs a month on average (nonfarm payrolls) in the three months through May 2019? | 100, 150 | (level(t) - level(t-3)) / 3 in thousands; Yes iff above the threshold | 0.5 thousand | 35 thousand | t-3, t | t-3..t (4 months) |
+| ip_fell | IPT | Did US industrial production fall in May 2019? | 0 | month-over-month % change of the IP index; Yes iff below 0 (the level fell) | 0.05 pp (half the published 0.1% unit) | 0.3 pp | t-1, t | t-1..t (2 months) |
+| cpi_12m_above | PCPI | Was US consumer price inflation (CPI) above 3% over the 12 months through May 2019? | 2, 2.5, 3 | 12-month % change of the seasonally adjusted CPI index; Yes iff above the threshold | 0.05 pp (half the published 0.1 pp unit) | 0.25 pp | t-12, t | t-12..t (13 months) |
+| cpi_1m_above | PCPI | Did US consumer prices (CPI) rise by more than 0.3% in May 2019? | 0.2, 0.3 | month-over-month % change of the seasonally adjusted CPI index; Yes iff above the threshold | 0.05 pp | 0.1 pp | t-1, t | t-1..t (2 months) |
+| unemployment_rose | RUC | Did the US unemployment rate rise in May 2019? | 0 | month-over-month change of the rate rounded to its published 0.1 pp; Yes iff it rose (by at least 0.1); unchanged is No. The distance is measured from 0.05, midway between unchanged and +0.1 | 0.05 pp (always met: changes are multiples of 0.1) | 0.15 pp | t-1, t | t-1..t (2 months) |
+
+Key observations are the observations the gold reads (also used by the
+memorization probe). The computation window is every observation from the
+earliest key observation through the period, inclusive (t = the task's month, q =
+its quarter); it is what same-series overlap, the COVID exclusion and the
+no_change identity check use.
 
 Notes: GDP growth is the annualized quarter-over-quarter change of the real GDP
 level; payroll changes are level differences in thousands; IP 'fell' is a
@@ -84,6 +90,11 @@ Unfilled slots: 0 (flip 0, control 0, no_change 0). Overlapping same-series pair
 | no_change | RUC | 1 | 1 |
 
 Tasks per period year: 2016: 6, 2017: 5, 2018: 5, 2019: 5, 2020: 1, 2021: 4, 2022: 5, 2023: 4, 2024: 5, 2025: 5.
+
+Unemployment-rate flips: 5 of 5 are rounding-boundary flips (the published
+month-over-month change is unchanged in one vintage and +0.1 pp in the other),
+i.e. the smallest revision that can change the answer. Computed by
+`rounding_boundary_flips` at build time.
 
 ## Tasks
 

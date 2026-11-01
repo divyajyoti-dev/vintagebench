@@ -1011,6 +1011,43 @@ def _example(tp: Template) -> str:
     return tp.question(p, tp.thresholds[-1])
 
 
+def _rel(k: int, quarterly: bool) -> str:
+    base = "q" if quarterly else "t"
+    n = k // 3 if quarterly else k
+    return base if n == 0 else f"{base}{n:+d}"
+
+
+def key_observations_label(tp: Template) -> str:
+    """E.g. 't-3, t' or 't-12..t (13 obs)'; relative to the period (t = month, q =
+    quarter)."""
+    offs = sorted(tp.offsets)
+    if len(offs) > 2:
+        return f"{_rel(offs[0], tp.quarterly)}..{_rel(0, tp.quarterly)} ({len(offs)} obs)"
+    return ", ".join(_rel(k, tp.quarterly) for k in offs)
+
+
+def window_label(tp: Template) -> str:
+    """The full computation window (overlap, COVID exclusion, no_change identity)."""
+    n = len(tp.window(date(2019, 1, 1)))
+    unit = "quarters" if tp.quarterly else "months"
+    lo = _rel(min(tp.offsets), tp.quarterly)
+    return f"{lo}..{_rel(0, tp.quarterly)} ({n} {unit})"
+
+
+def rounding_boundary_flips(tasks: Iterable[Task]) -> tuple[int, int]:
+    """(k, n): of the n RUC flips, k flip across the rounding boundary only (the
+    published change is 0 in one vintage and +0.1 pp in the other, i.e. |distance| is
+    exactly the 0.05 margin in both vintages). Needs computed margins (load_tasks)."""
+    flips = [t for t in tasks if t.template == "unemployment_rose" and t.kind == "flip"]
+    m = TEMPLATES["unemployment_rose"].margin
+    k = sum(
+        abs(abs(t.margin_as_of) - m) < 1e-6 and abs(abs(t.margin_revised) - m) < 1e-6
+        for t in flips
+        if t.margin_as_of is not None and t.margin_revised is not None
+    )
+    return k, len(flips)
+
+
 def render_readme(sel: Selection, counts: dict[str, dict[str, int]], seed: int) -> str:
     tasks = sel.tasks
     clusters = task_clusters(tasks)
@@ -1032,21 +1069,24 @@ def render_readme(sel: Selection, counts: dict[str, dict[str, int]], seed: int) 
         "computed within one vintage, unrounded unless stated; ties count as No.",
         "",
         "| template | series | example question | thresholds | gold (deciding quantity) "
-        "| materiality margin | control cap | key observations |",
-        "|---|---|---|---|---|---|---|---|",
+        "| materiality margin | control cap | key observations | computation window |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for tp in TEMPLATE_LIST:
         thr = ", ".join(f"{x:g}" for x in tp.thresholds)
         unit = "pp" if tp.series_id != "EMPLOY" else "thousand"
-        offs = ", ".join(("t" if k == 0 else f"t{k:+d}") for k in (min(tp.offsets), 0))
-        offs = f"{offs} ({len(tp.offsets)} obs)" if len(tp.offsets) > 2 else offs
-        if tp.quarterly:
-            offs = "q-1, q"
         lines.append(
             f"| {tp.key} | {tp.series_id} | {_example(tp)} | {thr} | {tp.quantity_doc} "
-            f"| {tp.margin_doc} | {tp.cap:g} {unit} | {offs} |"
+            f"| {tp.margin_doc} | {tp.cap:g} {unit} | {key_observations_label(tp)} "
+            f"| {window_label(tp)} |"
         )
     lines += [
+        "",
+        "Key observations are the observations the gold reads (also used by the",
+        "memorization probe). The computation window is every observation from the",
+        "earliest key observation through the period, inclusive (t = the task's month, q =",
+        "its quarter); it is what same-series overlap, the COVID exclusion and the",
+        "no_change identity check use.",
         "",
         "Notes: GDP growth is the annualized quarter-over-quarter change of the real GDP",
         "level; payroll changes are level differences in thousands; IP 'fell' is a",
@@ -1108,9 +1148,15 @@ def render_readme(sel: Selection, counts: dict[str, dict[str, int]], seed: int) 
             if y or n:
                 lines.append(f"| {kind} | {sid} | {y} | {n} |")
     years = Counter(_d(t.period).year for t in tasks)
+    k, n = rounding_boundary_flips(tasks)
     lines += [
         "",
         "Tasks per period year: " + ", ".join(f"{y}: {years[y]}" for y in sorted(years)) + ".",
+        "",
+        f"Unemployment-rate flips: {k} of {n} are rounding-boundary flips (the published",
+        "month-over-month change is unchanged in one vintage and +0.1 pp in the other),",
+        "i.e. the smallest revision that can change the answer. Computed by",
+        "`rounding_boundary_flips` at build time.",
         "",
     ]
     lines += [
