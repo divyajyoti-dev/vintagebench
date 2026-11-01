@@ -1,130 +1,102 @@
-"""Sanity agents on the TOY fixture: exact expected scores, no network."""
+"""Sanity agents hit their expected scores on synthetic data (SPEC §4.5). No network."""
 
-from pathlib import Path
+import json
 
-import pandas as pd
 import pytest
+from harness_fakes import CONTROL, FLIP, NO_CHANGE, TASKS, install
 
-from vintagebench import episode, grader, models, sanity
-from vintagebench.tasks import Task, load_tasks
+from vintagebench import grader, sanity
+from vintagebench.episode import run_episode, run_probe
 
-FIXTURES = Path(__file__).parent / "fixtures"
-ROOT = FIXTURES / "vintages"
-TASKS = load_tasks(FIXTURES / "tasks.jsonl")  # toy-001 flip, toy-002/003 controls
-
-# per task (toy-001, toy-002, toy-003): (asof, revised, update, leakage, brier)
-EXPECTED = {
-    "oracle": [(1, 1, 1, 0, 0.0), (1, 1, 1, 0, 0.0), (1, 1, 1, 0, 0.0)],
-    "always_yes": [(0, 1, 0, 0, 0.25), (1, 1, 1, 0, 0.25), (0, 0, 1, 0, 0.25)],
-    "leaker": [(0, 1, 0, 1, 1.0), (1, 1, 1, 1, 0.0), (1, 1, 1, 1, 0.0)],
-    "never_update": [(1, 0, 0, 0, 0.0), (1, 1, 1, 0, 0.0), (1, 1, 1, 0, 0.0)],
-}
+ROOT = "unused-root"
 
 
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    def boom(*a, **k):
-        raise AssertionError("sanity agents must not call models")
-
-    monkeypatch.setattr(models, "complete", boom)
-    monkeypatch.setattr(models, "make_client", boom)
-    for var in ("OPENAI_API_KEY", "TOGETHER_API_KEY"):
-        monkeypatch.delenv(var, raising=False)
+def fake_data(monkeypatch):
+    install(monkeypatch)
 
 
-@pytest.mark.parametrize("agent", sanity.SANITY_AGENTS, ids=lambda a: a.name)
-def test_sanity_agent_scores_on_toy(agent):
-    got = []
-    for task in TASKS:
-        rec = episode.run_episode(task, agent, trial=1, root=ROOT)
-        s = grader.grade(task, rec, ROOT)
-        got.append((s.asof_correct, s.revised_correct, s.update_correct, s.leakage, s.brier))
-        assert rec.cost_usd == 0 and rec.agent == agent.name
-    assert got == EXPECTED[agent.name]
+def episodes(agent):
+    return {t.id: grader.grade(t, run_episode(t, agent, 1, ROOT), ROOT) for t in TASKS}
 
 
-def test_summary_of_sanity_agents():
-    scores = [
-        grader.grade(t, episode.run_episode(t, a, trial, ROOT), ROOT)
-        for a in sanity.SANITY_AGENTS
-        for t in TASKS
-        for trial in (1, 2)
+def probes(agent):
+    return {t.id: grader.grade_probe(t, run_probe(t, agent, ROOT), ROOT) for t in TASKS}
+
+
+def test_oracle_is_perfect():
+    for s in episodes(sanity.oracle).values():
+        assert s.asof_correct and s.revised_correct and s.update_correct
+        assert s.self_report_agrees is True and not s.leakage
+        assert not (s.contradiction_t1 or s.contradiction_t2)
+        assert s.confidence_brier == 0 and s.survival_brier == 0
+
+
+def test_oracle_survival_prob_and_calculation():
+    rec = run_episode(FLIP, sanity.oracle, 1, ROOT)
+    assert rec.turn1["survival_prob"] == 0.0 and list(rec.turn1)[:2] == ["calculation", "answer"]
+    assert run_episode(CONTROL, sanity.oracle, 1, ROOT).turn1["survival_prob"] == 1.0
+    assert grader.final_conclusion(rec.turn1["calculation"]) is False
+    assert grader.final_conclusion(rec.turn2["calculation"]) is True
+    assert not any(ch.isdigit() for ch in rec.turn1["calculation"])
+    # turn 2 answered from the re-served data in the user message, no extra tool call
+    assert sum(m["role"] == "tool" for m in rec.transcript) == 1
+    assert rec.turn2["values_used"] == {"2020-05-01": 101.1, "2020-06-01": 100.8}
+
+
+def test_always_yes():
+    s = episodes(sanity.always_yes)
+    assert [s[t.id].asof_correct for t in TASKS] == [t.gold_as_of for t in TASKS]
+    assert [s[t.id].update_correct for t in TASKS] == [not t.flips for t in TASKS]
+
+
+def test_leaker_flagged_exactly_where_latest_differs():
+    s = episodes(sanity.leaker)
+    assert s[FLIP.id].leakage_t1 and s[NO_CHANGE.id].leakage_t1
+    assert not s[CONTROL.id].leakage_t1
+    assert [sanity.latest_differs(t, ROOT) for t in TASKS] == [True, False, True]
+    assert not any(x.contradiction_t1 or x.contradiction_t2 for x in s.values())
+    assert not s[NO_CHANGE.id].asof_correct  # latest March falls: answers yes
+
+
+def test_never_update():
+    s = episodes(sanity.never_update)
+    for t in TASKS:
+        assert s[t.id].asof_correct
+        assert s[t.id].update_correct == (not t.flips) == s[t.id].revised_correct
+        assert not s[t.id].leakage and not s[t.id].contradiction_t2
+
+
+def test_probe_recallers():
+    first = probes(sanity.first_release_recaller)
+    latest = probes(sanity.latest_recaller)
+    assert first[FLIP.id].task_class == "first_release"
+    assert latest[FLIP.id].task_class == "latest"
+    assert first[CONTROL.id].task_class == latest[CONTROL.id].task_class == "indistinguishable"
+    assert first[CONTROL.id].counts["both"] == 2
+    assert latest[NO_CHANGE.id].counts == {
+        "first_release": 0, "latest": 1, "both": 1, "neither": 0, "no_answer": 0,
+    }  # fmt: skip
+
+
+def test_check_expectations_passes_and_catches_a_broken_agent():
+    scores = [s for a in sanity.SANITY_AGENTS for s in episodes(a).values()]
+    probe_scores = [p for a in sanity.PROBE_AGENTS for p in probes(a).values()]
+    assert sanity.check_expectations(scores, probe_scores, TASKS, ROOT) == []
+
+    class BadOracle(sanity.Oracle):
+        def turn2(self, messages, task, root):
+            r = super().turn2(messages, task, root)
+            obj = json.loads(r.text)
+            return type(r)(json.dumps({**obj, "answer": "no"}))
+
+    bad = BadOracle()
+    bad_scores = list(episodes(bad).values())
+    assert all(s.agent == "oracle" for s in bad_scores)
+    failures = sanity.check_expectations(bad_scores, [], TASKS, ROOT)
+    assert any("toy-flip" in f and "revised_correct" in f for f in failures)
+    swapped = [
+        grader.ProbeScores(**{**p.__dict__, "agent": "first_release_recaller"})
+        for p in probes(sanity.latest_recaller).values()
     ]
-    df = grader.summarize(scores)
-    o = df.loc["oracle"]
-    assert (o["asof_correct"], o["revised_correct"], o["update_correct"]) == (1, 1, 1)
-    assert (o["leakage_rate"], o["brier"], o["pass_k"]) == (0, 0, 1)
-    assert df.loc["never_update", "update_correct_control"] == 1
-    assert df.loc["never_update", "update_correct_flip"] == 0
-    assert df.loc["leaker", "leakage_rate"] == 1
-    assert df.loc["always_yes", "asof_correct"] == pytest.approx(1 / 3)
-    assert df["cost_usd"].sum() == 0
-
-
-def test_oracle_reports_served_as_of_values():
-    rec = episode.run_episode(TASKS[0], sanity.oracle, trial=1, root=ROOT)
-    assert rec.turn1["values_used"]["2020-06-01"] == 101.5
-    assert len(rec.turn1["values_used"]) == 12
-    assert sum(m["role"] == "tool" for m in rec.transcript) == 2  # tool used in both turns
-
-
-def test_leaker_reports_latest_vintage():
-    rec = episode.run_episode(TASKS[0], sanity.leaker, trial=1, root=ROOT)
-    used = rec.turn1["values_used"]
-    assert (used["2020-06-01"], used["2020-11-01"], used["2020-12-01"]) == (100.8, 102.7, 103.1)
-
-
-# --- leaker: episode-level checks on a tmp fixture -----------------------------------
-
-MONTHS = [f"2020-{m:02d}-01" for m in range(1, 13)]
-FIRST = [100.0 + i / 10 for i in range(12)]
-
-
-def _write_series(root, revisions):
-    """LEAK series: first vintage 2021-01-15 with all 2020 months, plus later rows."""
-
-    def d(s):
-        return pd.Timestamp(s).date()
-
-    rows = [("LEAK", d(m), d("2021-01-15"), v) for m, v in zip(MONTHS, FIRST, strict=True)]
-    rows += [("LEAK", d(obs), d(vint), v) for vint, obs, v in revisions]
-    cols = ["series_id", "observation_date", "vintage_date", "value"]
-    pd.DataFrame(rows, columns=cols).to_parquet(root / "LEAK.parquet", index=False)
-
-
-def _leak_task():
-    return Task(
-        id="leak-1", series_id="LEAK", as_of_date="2021-01-15",
-        question="Did LEAK fall in June 2020 versus the prior month?", answer_type="yes_no",
-        gold_as_of=False, revision_date="2021-02-15", gold_revised=False, flips=False,
-    )  # fmt: skip
-
-
-def _leaker_leakage(root):
-    task = _leak_task()
-    rec = episode.run_episode(task, sanity.leaker, trial=1, root=root)
-    return grader.grade(task, rec, root).leakage, rec.turn1["values_used"]
-
-
-def test_leaker_not_flagged_when_latest_equals_as_of(tmp_path):
-    _write_series(tmp_path, [])  # single vintage: latest == as-of
-    leakage, used = _leaker_leakage(tmp_path)
-    assert len(used) == 12 and leakage is False
-
-
-def test_leaker_not_flagged_when_later_vintage_repeats_as_of_values(tmp_path):
-    _write_series(tmp_path, [("2021-02-15", "2020-06-01", FIRST[5])])  # unchanged value
-    assert _leaker_leakage(tmp_path)[0] is False
-
-
-def test_leaker_flagged_when_latest_differs(tmp_path):
-    _write_series(tmp_path, [("2021-02-15", "2020-06-01", 99.9)])
-    leakage, used = _leaker_leakage(tmp_path)
-    assert used["2020-06-01"] == 99.9 and leakage is True
-
-
-def test_leaker_flagged_for_observation_unpublished_at_as_of(tmp_path):
-    # the window ends on as_of_date; 2021-01-01 was first published after as_of
-    _write_series(tmp_path, [("2021-02-05", "2021-01-01", 101.5)])
-    leakage, used = _leaker_leakage(tmp_path)
-    assert "2021-01-01" in used and leakage is True
+    assert sanity.check_expectations([], swapped, TASKS, ROOT)
