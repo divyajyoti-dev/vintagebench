@@ -30,10 +30,10 @@ def test_smoke() -> None:
     june = pd.Timestamp("2020-06-01").date()
     assert first[june] > 0 > revised[june]
 
-    task_fields = [f.name for f in dataclasses.fields(tasks.Task)]
+    task_fields = {f.name for f in dataclasses.fields(tasks.Task)}
+    assert set(tasks.DEFINITION_FIELDS) <= task_fields
     lines = (FIXTURES / "tasks.jsonl").read_text().splitlines()
     assert len(lines) == 3
     for line in lines:
         row = json.loads(line)
-        assert list(row) == task_fields
-        tasks.Task(**row)
+        assert tuple(row) == tasks.DEFINITION_FIELDS

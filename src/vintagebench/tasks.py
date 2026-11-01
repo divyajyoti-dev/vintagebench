@@ -1,1624 +1,1168 @@
-"""Task schema, candidate generation and pilot selection (SPEC §3, §5).
+"""VintageBench v1 tasks: templates, gold functions, candidates, selection, base rates.
 
-Gold answers are computed by small pure functions over a *snapshot*: the
-``pd.Series`` returned by :func:`vintagebench.data.get_as_of` (values indexed by
-observation_date, as known on one date). Each SPEC §3 template has one gold
-function. A gold function returns ``None`` when an observation it needs is missing
-(or NaN); such candidates are skipped, never guessed.
+SPEC §3 and §5. Data come from the local RTDSM vintages (vintagebench.data); the task
+file (tasks/v1.jsonl) stores only task *definitions* (SPEC §2.3). Golds, flips and
+threshold distances are recomputed from the vintages by :func:`load_tasks`.
 
-Date rules (applied by :func:`build_candidates`, per target observation ``t``):
+Gold answers
+------------
+Each template has one pure gold function over a *snapshot* (a mapping or Series of
+observation_date -> value as published in one vintage). Every gold answer is computed
+within one snapshot, so base-year changes between vintages (ROUTPUT, IPT) cannot affect
+it; only the resulting Yes/No answers are compared across vintages. A gold function
+returns None when an observation it needs is missing. Ties count as "no" (and are
+excluded from tasks by the materiality rule anyway).
 
-- ``as_of_date`` = the first vintage date on which ``t`` appears, i.e. the
-  observation's first release. The question is therefore answerable from the
-  as-of vintage alone (it is skipped if any other needed observation is missing).
-- ``revision_date`` = the first vintage date at least one year after
-  ``as_of_date``; if no such vintage exists, the latest vintage date after
-  ``as_of_date``. Candidates with no later vintage are skipped.
-- ``flips`` = ``gold_as_of != gold_revised``.
-- Targets whose first vintage predates 2016-01-01 are skipped: the earliest stored
-  vintage of each series is a baseline (data as of 2016-01-01), not a first release.
+Each template also has a *deciding quantity* (e.g. annualized GDP growth) and a signed
+*distance* from its threshold, positive iff the answer is Yes. Materiality: |distance|
+>= the template margin (half a publication unit) in both vintages, so the answer is the
+same whether published (rounded) or unrounded figures are used. Controls additionally
+need |distance| <= the template cap in both vintages.
 
-Every gold answer is computed within one snapshot (one vintage); levels are never
-compared across vintages, so base-year rebasings (GDPC1/PCEPI 2018-07, 2023-09;
-INDPRO 2021-05-28) cannot affect a gold answer. Only the resulting booleans are
-compared across vintages (``flips``).
+Dates (per instance = series, template, period, threshold)
+---------------------------------------------------------
+- as_of_date: the first vintage that contains the period (its first release); the
+  deciding quantity must be computable there. Periods before 2016 or already in the
+  baseline (first) vintage are skipped (no genuine first release in range).
+- flip / control: revision_date = the pinned latest vintage, at least 365 days later.
+- no_change: revision_date = the last vintage of the unbroken run of vintages after the
+  as-of vintage in which every observation of the computation window is identical.
+- Periods: 2016-01 .. 2025-12 (2016 Q1 .. 2025 Q4).
+- COVID exclusion (all kinds): no computation window touching 2020-02..2021-03
+  (2020 Q1..2021 Q1 for GDP).
 
-Regenerate the pilot with ``python -m vintagebench.tasks`` (writes
-tasks/pilot.jsonl and tasks/README.md from data/vintages/). The 60-task set
-(the 20 pilot tasks kept exactly, plus 40 from :func:`extend_pilot`) is
-regenerated with ``python -m vintagebench.tasks --extend-from tasks/pilot.jsonl
---n 60 --out tasks/pilot60.jsonl --readme-out tasks/README60.md --seed 0``; see
-``--help``. The file lists the 20 pilot tasks first (pilot.jsonl order), then the
-new ones by id. New tasks additionally need a revision gap of at least 365 days and
-avoid same-series overlap of :func:`computation_window` where possible; overlap
-clusters are given by :func:`task_clusters`.
-
-Only target observations dated 2016-01-01 .. 2025-12-31 are used (SPEC §3).
-All comparisons are strict; exact ties (within ``EPS``) count as "no".
-
-Materiality margin: a candidate is kept only if, in BOTH vintages, the deciding
-quantity is clear of its threshold by at least the margin below (half the 0.1
-publication unit, or stricter), so no gold answer hinges on a difference below
-published precision:
-
-- GDPC1 shrink: |quarter-over-quarter % change, non-annualized| >= 0.05 (about 0.2pp
-  annualized; stricter than half the 0.1 unit BEA uses for annualized growth)
-- GDPC1 growth above 2%: |annualized QoQ growth - 2.0| >= 0.2 percentage points,
-  the annualized equivalent of the 0.05 non-annualized GDP margin (see
-  ``GDP_ANNUALIZED_MARGIN``)
-- INDPRO: |month-over-month % change| >= 0.05
-- PCEPI: |12-month % change - 2.5| >= 0.05 percentage points
-- PAYEMS 3-month average: |average - threshold| >= 1 (thousand jobs)
-- PAYEMS weakest-12m: |change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand)
-- UNRATE: none (values are compared after rounding to the published 0.1).
-
-COVID exclusion (controls only, applied in :func:`select_pilot`): a control is
-never selected if any observation its answer reads falls in the COVID collapse,
-i.e. a month from 2020-03 to 2020-06 for monthly series, or for GDPC1 any quarter
-containing such a month (2020 Q1, Q2) plus the rebound quarter 2020 Q3. Such
-controls are trivially decided by the collapse. The window is the
-target period plus the template's ``lookback_months`` (e.g. 3 for the payroll
-3-month average, 12 for weakest-of-12 and PCE YoY). Flips there stay eligible.
-
-Non-trivial controls (applied in :func:`select_pilot`): each candidate's distance
-from the threshold, in units of the template's materiality margin, is computed
-numerically in both vintages (unrounded; kept as an internal attribute, not
-serialized, and recomputed from the vintage data after :func:`load_tasks`; the
-notes only display it). A non-UNRATE control is never selected if
-that distance exceeds the template's ``control_cap`` in BOTH vintages (it is
-obvious from the era alone). Caps: 10 margins for INDPRO (0.5% MoM), PCEPI
-(0.5pp) and GDPC1 growth (2pp annualized); 5 margins for GDPC1 shrink (0.25% QoQ,
-about 1pp annualized); 40 margins
-(40k jobs) for both PAYEMS templates. UNRATE controls and all flips are exempt.
+CLI: ``python -m vintagebench.tasks --build`` writes tasks/v1.jsonl, tasks/README.md and
+tasks/BASE_RATES.md; ``--base-rates`` writes only tasks/BASE_RATES.md.
 """
 
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import math
 import random
-import warnings
-from collections import Counter
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
-from datetime import date
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, replace
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
 from vintagebench import data
 
-AnswerType = Literal["yes_no", "number"]
-Answer = bool | float
+EPS = 1e-9
+PERIOD_START = date(2016, 1, 1)
+PERIOD_END = date(2025, 12, 1)  # last period considered (periods 2016-2025)
+MIN_REVISION_GAP_DAYS = 365
+NO_CHANGE_PREFERRED_GAP_DAYS = 90
+COVID_MONTHS = (date(2020, 2, 1), date(2021, 3, 1))  # inclusive; quarterly: 2020Q1..2021Q1
+KINDS: tuple[str, ...] = ("flip", "control", "no_change")
+Kind = Literal["flip", "control", "no_change"]
+# (yes, no) as-of answer quotas per kind; no_change falls back to (2, 3) if needed.
+QUOTAS: dict[str, tuple[int, int]] = {"flip": (10, 10), "control": (10, 10), "no_change": (3, 2)}
+SEED = 0
+TASKS_DIR: Path = data.REPO_ROOT / "tasks"
+V1_PATH: Path = TASKS_DIR / "v1.jsonl"
 
-EPS = 1e-9  # float tolerance: |a - b| <= EPS is a tie
-FIRST_YEAR, LAST_YEAR = 2016, 2025
-BASELINE_CUTOFF = date(2016, 1, 1)  # vintages before this are the pre-2016 baseline
-CONTROL_SERIES = "UNRATE"
-N_CONTROL_SERIES = 2
+Snapshot = Mapping[date, float]
 
-
-@dataclass(frozen=True)
-class Task:
-    """One benchmark task; one line of tasks/pilot.jsonl.
-
-    Dates are ISO strings (YYYY-MM-DD). Gold answers are computed
-    programmatically from the as-of and revision vintages, never hand-labeled.
-    """
-
-    id: str
-    series_id: str
-    as_of_date: str
-    question: str
-    answer_type: AnswerType
-    gold_as_of: Answer
-    revision_date: str
-    gold_revised: Answer
-    flips: bool
-    notes: str = ""
+# --- dates and snapshots ----------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Snapshot helpers (pure)
-# ---------------------------------------------------------------------------
+def _d(x: object) -> date:
+    """Normalise a date-like (date, datetime, Timestamp, ISO string) to datetime.date."""
+    if type(x) is date:
+        return x
+    return pd.Timestamp(x).date()
 
 
-def _normalize(snapshot: pd.Series) -> pd.Series:
-    """Index by Timestamp, drop NaN values, sort by observation date."""
-    s = snapshot.dropna().astype(float)
-    s.index = pd.to_datetime(s.index)
-    return s.sort_index()
+def shift(d: date, months: int) -> date:
+    """First day of the month ``months`` after (before, if negative) ``d``'s month."""
+    y, m = divmod(d.year * 12 + d.month - 1 + months, 12)
+    return date(y, m + 1, 1)
 
 
-def _shift(t: pd.Timestamp, months: int) -> pd.Timestamp:
-    return pd.Timestamp(t) + pd.DateOffset(months=months)
+def as_snapshot(values: Mapping[Any, Any] | pd.Series) -> dict[date, float]:
+    """Mapping/Series of date-like -> number as {date: float}; None/NaN/non-numeric
+    values are dropped."""
+    items = values.items()
+    out: dict[date, float] = {}
+    for k, v in items:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f):
+            out[_d(k)] = f
+    return out
 
 
-def _value(s: pd.Series, t: pd.Timestamp) -> float | None:
-    v = s.get(pd.Timestamp(t))
-    return None if v is None or pd.isna(v) else float(v)
+def _val(s: Snapshot, d: date) -> float | None:
+    v = s.get(d)
+    return None if v is None or v != v else float(v)
 
 
-def change(snapshot: pd.Series, t: pd.Timestamp, months: int = 1) -> float | None:
-    """Level at ``t`` minus level ``months`` earlier; None if either is missing."""
-    s = _normalize(snapshot)
-    now, before = _value(s, t), _value(s, _shift(t, -months))
+# --- deciding quantities (pure) --------------------------------------------------------
+
+
+def level_change(s: Snapshot, t: date, months: int = 1) -> float | None:
+    """level(t) - level(t - months); None if either is missing."""
+    now, before = _val(s, t), _val(s, shift(t, -months))
     return None if now is None or before is None else now - before
 
 
-def monthly_changes(snapshot: pd.Series, t: pd.Timestamp, n: int) -> list[float] | None:
-    """One-month changes for the ``n`` months ending at ``t`` (oldest first)."""
-    out = [change(snapshot, _shift(t, -k)) for k in range(n - 1, -1, -1)]
-    return None if any(c is None for c in out) else [float(c) for c in out]  # type: ignore[arg-type]
-
-
-def avg_change_3m(snapshot: pd.Series, t: pd.Timestamp) -> float | None:
-    """Average one-month change over the 3 months ending at ``t``: (L_t - L_{t-3}) / 3."""
-    d = change(snapshot, t, months=3)
-    return None if d is None else d / 3
-
-
-def yoy_pct(snapshot: pd.Series, t: pd.Timestamp) -> float | None:
-    """Unrounded 12-month percent change: 100 * (L_t / L_{t-12} - 1)."""
-    s = _normalize(snapshot)
-    now, before = _value(s, t), _value(s, _shift(t, -12))
-    if now is None or before is None or before == 0:
+def pct_change(s: Snapshot, t: date, months: int = 1) -> float | None:
+    """100 * (level(t) / level(t - months) - 1), unrounded."""
+    now, before = _val(s, t), _val(s, shift(t, -months))
+    if now is None or before is None or before <= 0:
         return None
     return 100.0 * (now / before - 1.0)
 
 
-def pct_change(snapshot: pd.Series, t: pd.Timestamp, months: int = 1) -> float | None:
-    """Unrounded percent change over ``months``: 100 * (L_t / L_{t-months} - 1)."""
-    s = _normalize(snapshot)
-    now, before = _value(s, t), _value(s, _shift(t, -months))
-    if now is None or before is None or before == 0:
-        return None
-    return 100.0 * (now / before - 1.0)
-
-
-# ---------------------------------------------------------------------------
-# Materiality margins (pure): distance of the deciding quantity from its threshold
-# ---------------------------------------------------------------------------
-
-# Half the 0.1 publication unit for INDPRO % changes and the PCE YoY rate. For GDPC1
-# the same 0.05 applies to the non-annualized QoQ % change, i.e. about 0.2pp
-# annualized: stricter than half of BEA's 0.1 unit for annualized growth.
-PCT_MARGIN = 0.05
-PAYROLL_MARGIN_K = 1.0  # PAYEMS is published in whole thousands
-
-
-def gdp_margin(snapshot: pd.Series, quarter: pd.Timestamp) -> float | None:
-    """GDPC1: |quarter-over-quarter % change, non-annualized| (threshold 0)."""
-    p = pct_change(snapshot, quarter, months=3)
-    return None if p is None else abs(p)
-
-
-# Annualized margin for the GDP growth template. The shrink margin is 0.05%
-# non-annualized; annualizing maps a non-annualized change g to 100*((1+g/100)^4-1),
-# whose slope is 4*(1+g/100)^3: about 4.0 near 0% and about 4.06 near 2% annualized
-# (g ~ 0.5%), so 0.05 maps to about 0.20pp. We use 0.2pp.
-GDP_ANNUALIZED_MARGIN = 0.2
-GDP_GROWTH_THRESHOLD = 2.0
-
-
-def annualized_qoq_pct(snapshot: pd.Series, quarter: pd.Timestamp) -> float | None:
-    """Unrounded annualized QoQ growth: 100 * ((L_q / L_{q-1 quarter})^4 - 1)."""
-    s = _normalize(snapshot)
-    now, before = _value(s, quarter), _value(s, _shift(quarter, -3))
+def annualized_qoq_pct(s: Snapshot, q: date) -> float | None:
+    """GDP convention: 100 * ((level(q) / level(q-1))^4 - 1), q = quarter's first day."""
+    now, before = _val(s, q), _val(s, shift(q, -3))
     if now is None or before is None or before <= 0:
         return None
     return 100.0 * ((now / before) ** 4 - 1.0)
 
 
-def gdp_growth_margin(
-    snapshot: pd.Series, quarter: pd.Timestamp, threshold_pct: float = GDP_GROWTH_THRESHOLD
-) -> float | None:
-    """GDPC1: |annualized QoQ growth - threshold| in percentage points."""
-    a = annualized_qoq_pct(snapshot, quarter)
-    return None if a is None else abs(a - threshold_pct)
+def avg_change_3m(s: Snapshot, t: date) -> float | None:
+    """Average monthly level change over the 3 months through t: (L_t - L_{t-3}) / 3."""
+    d = level_change(s, t, 3)
+    return None if d is None else d / 3.0
 
 
-def mom_pct_margin(snapshot: pd.Series, month: pd.Timestamp) -> float | None:
-    """INDPRO: |month-over-month % change| (threshold 0)."""
-    p = pct_change(snapshot, month)
-    return None if p is None else abs(p)
+def yoy_pct(s: Snapshot, t: date) -> float | None:
+    """12-month percent change of the index."""
+    return pct_change(s, t, 12)
 
 
-def pce_margin(
-    snapshot: pd.Series, month: pd.Timestamp, threshold_pct: float = 2.5
-) -> float | None:
-    """PCEPI: |12-month % change - threshold| in percentage points."""
-    y = yoy_pct(snapshot, month)
-    return None if y is None else abs(y - threshold_pct)
+def monthly_changes(s: Snapshot, t: date, n: int) -> list[float] | None:
+    """One-month level changes for the ``n`` months ending at t (oldest first)."""
+    out = [level_change(s, shift(t, -k)) for k in range(n - 1, -1, -1)]
+    return None if any(c is None for c in out) else [float(c) for c in out]  # type: ignore[arg-type]
 
 
-def payrolls_3m_margin(
-    snapshot: pd.Series, month: pd.Timestamp, threshold_k: float
-) -> float | None:
-    """PAYEMS: |3-month average change - threshold| in thousands."""
-    a = avg_change_3m(snapshot, month)
-    return None if a is None else abs(a - threshold_k)
+def weakest_gap(s: Snapshot, t: date) -> float | None:
+    """change(t) - min(change(t-11) .. change(t-1)); negative iff t is the weakest of
+    the 12 months through t."""
+    ch = monthly_changes(s, t, 12)
+    return None if ch is None else ch[-1] - min(ch[:-1])
 
 
-def payrolls_weakest_margin(snapshot: pd.Series, month: pd.Timestamp) -> float | None:
-    """PAYEMS: |change(t) - min of the 11 preceding changes| in thousands.
-
-    For a "yes" this is how much the month wins by; for a "no" how far it is above
-    the weakest earlier month.
-    """
-    changes = monthly_changes(snapshot, month, 12)
-    return None if changes is None else abs(changes[-1] - min(changes[:-1]))
-
-
-def prior_11_min_change(snapshot: pd.Series, month: pd.Timestamp) -> float | None:
-    """PAYEMS: the minimum one-month change over the 11 months before ``month``."""
-    changes = monthly_changes(snapshot, month, 12)
-    return None if changes is None else min(changes[:-1])
-
-
-def is_material(margin: float | None, minimum: float) -> bool:
-    """True iff ``margin`` is known and >= ``minimum`` (within EPS)."""
-    return margin is not None and margin >= minimum - EPS
-
-
-# ---------------------------------------------------------------------------
-# Gold functions, one per SPEC §3 template (pure)
-# ---------------------------------------------------------------------------
-
-
-def real_gdp_shrank(snapshot: pd.Series, quarter: pd.Timestamp) -> bool | None:
-    """GDPC1: yes iff real GDP in ``quarter`` < real GDP in the previous quarter.
-
-    ``quarter`` is the quarter's first day (ALFRED convention). Tie -> no.
-    """
-    d = change(snapshot, quarter, months=3)
-    return None if d is None else d < -EPS
-
-
-def real_gdp_grew_faster_than(
-    snapshot: pd.Series, quarter: pd.Timestamp, threshold_pct: float = GDP_GROWTH_THRESHOLD
-) -> bool | None:
-    """GDPC1: yes iff annualized QoQ growth 100*((L_q/L_{q-1})^4 - 1) > threshold.
-
-    Unrounded; a tie (within EPS) -> no.
-    """
-    a = annualized_qoq_pct(snapshot, quarter)
-    return None if a is None else a > threshold_pct + EPS
-
-
-def payrolls_weakest_in_12m(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
-    """PAYEMS: yes iff ``month``'s one-month change is strictly lower than each of
-    the 11 preceding months' one-month changes.
-
-    "The prior 12 months" is read as the 12-month window ending in (and including)
-    ``month``. Needs 13 levels (t-12 .. t). A tie with any earlier month -> no.
-    """
-    changes = monthly_changes(snapshot, month, 12)
-    if changes is None:
-        return None
-    this, earlier = changes[-1], changes[:-1]
-    return all(this < c - EPS for c in earlier)
-
-
-def payrolls_3m_avg_above(
-    snapshot: pd.Series, month: pd.Timestamp, threshold_k: float
-) -> bool | None:
-    """PAYEMS (thousands): yes iff (L_t - L_{t-3}) / 3 > ``threshold_k``. Tie -> no."""
-    d = change(snapshot, month, months=3)
-    return None if d is None else d > 3 * threshold_k + EPS
-
-
-def fell_vs_prior_month(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
-    """Yes iff the level in ``month`` < the level in the prior month. Tie -> no.
-
-    Used for INDPRO ("Did industrial production fall in <month>?").
-    """
-    d = change(snapshot, month)
-    return None if d is None else d < -EPS
-
-
-def industrial_production_fell(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
-    """INDPRO: alias of :func:`fell_vs_prior_month`."""
-    return fell_vs_prior_month(snapshot, month)
-
-
-def pce_yoy_above(
-    snapshot: pd.Series, month: pd.Timestamp, threshold_pct: float = 2.5
-) -> bool | None:
-    """PCEPI: yes iff the unrounded 12-month % change in the index > ``threshold_pct``.
-
-    Tie (within EPS) -> no. Note BEA reports this rate rounded to 0.1; we use the
-    unrounded value and say so in the question.
-    """
-    y = yoy_pct(snapshot, month)
-    return None if y is None else y > threshold_pct + EPS
-
-
-def unrate_rose(snapshot: pd.Series, month: pd.Timestamp) -> bool | None:
-    """UNRATE control: yes iff the rate in ``month`` > the rate in the prior month.
-
-    Design choice: SPEC §3 has no UNRATE template, so UNRATE (the low-revision
-    control series) gets the analogue of the INDPRO question: "Did the
-    unemployment rate rise in <month> versus the prior month?". Both values are
-    rounded to 0.1 (the published precision) before comparing, so float noise or
-    stray extra digits never create a change; equal rounded rates -> no.
-    """
-    s = _normalize(snapshot)
-    now, before = _value(s, month), _value(s, _shift(month, -1))
+def rounded_change(s: Snapshot, t: date, decimals: int = 1) -> float | None:
+    """Change between the values rounded to the publication precision."""
+    now, before = _val(s, t), _val(s, shift(t, -1))
     if now is None or before is None:
         return None
-    return round(now, 1) > round(before, 1)
+    return round(round(now, decimals) - round(before, decimals), 6)
 
 
-# ---------------------------------------------------------------------------
-# Templates
-# ---------------------------------------------------------------------------
+# --- gold functions, one per template (pure) --------------------------------------------
 
 
-def _month(t: pd.Timestamp) -> str:
-    return pd.Timestamp(t).strftime("%B %Y")
+def real_gdp_shrank(s: Snapshot, q: date) -> bool | None:
+    """Yes iff real GDP in quarter q is below the previous quarter's level."""
+    d = level_change(s, q, 3)
+    return None if d is None else d < -EPS
 
 
-def _quarter(t: pd.Timestamp) -> str:
-    t = pd.Timestamp(t)
-    return f"Q{t.quarter} {t.year}"
+def real_gdp_grew_faster_than(s: Snapshot, q: date, threshold: float) -> bool | None:
+    """Yes iff annualized quarter-over-quarter growth > threshold (percent)."""
+    a = annualized_qoq_pct(s, q)
+    return None if a is None else a > threshold + EPS
+
+
+def payrolls_weakest_in_12m(s: Snapshot, t: date) -> bool | None:
+    """Yes iff month t's payroll change is strictly below each of the 11 preceding
+    months' changes (the 12 months through t). Needs levels t-12 .. t."""
+    g = weakest_gap(s, t)
+    return None if g is None else g < -EPS
+
+
+def payrolls_3m_avg_above(s: Snapshot, t: date, threshold: float) -> bool | None:
+    """Yes iff the average monthly payroll change over the 3 months through t
+    (thousands) > threshold (thousands)."""
+    a = avg_change_3m(s, t)
+    return None if a is None else a > threshold + EPS
+
+
+def industrial_production_fell(s: Snapshot, t: date) -> bool | None:
+    """Yes iff the IP index in month t is below the previous month's."""
+    d = level_change(s, t)
+    return None if d is None else d < -EPS
+
+
+def cpi_12m_above(s: Snapshot, t: date, threshold: float) -> bool | None:
+    """Yes iff the 12-month percent change of the CPI index in month t > threshold."""
+    y = yoy_pct(s, t)
+    return None if y is None else y > threshold + EPS
+
+
+def cpi_1m_above(s: Snapshot, t: date, threshold: float) -> bool | None:
+    """Yes iff the one-month percent change of the CPI index in month t > threshold."""
+    p = pct_change(s, t)
+    return None if p is None else p > threshold + EPS
+
+
+def unemployment_rose(s: Snapshot, t: date) -> bool | None:
+    """Yes iff the unemployment rate (rounded to its published 0.1) is higher in month
+    t than in the previous month. Unchanged -> no."""
+    c = rounded_change(s, t)
+    return None if c is None else c > EPS
+
+
+# --- templates --------------------------------------------------------------------------
+
+
+def period_label(period: date, quarterly: bool) -> str:
+    """'May 2019' or '2018 Q4'."""
+    if quarterly:
+        return f"{period.year} Q{(period.month - 1) // 3 + 1}"
+    return period.strftime("%B %Y")
+
+
+def _pct(x: float) -> str:
+    return f"{x:g}%"
+
+
+def _jobs(x: float) -> str:
+    return f"{int(round(x * 1000)):,}"
 
 
 @dataclass(frozen=True)
 class Template:
     """A question template bound to one series.
 
-    ``gold`` and ``metric`` are pure functions of (snapshot, target period);
-    ``metric`` is the underlying number, reported in ``notes``.
+    ``offsets``: months relative to the period of the observations the gold reads (key
+    observations). ``direction`` +1: Yes iff quantity > cutoff; -1: Yes iff quantity <
+    cutoff; cutoff = threshold + ``cutoff_offset``. ``margin`` and ``cap`` are in the
+    deciding quantity's units.
     """
 
     key: str
-    months_per_period: int  # 1 = monthly, 3 = quarterly
-    question: Callable[[pd.Timestamp], str]
-    gold: Callable[[pd.Series, pd.Timestamp], bool | None]
-    metric: Callable[[pd.Series, pd.Timestamp], float | None]
-    metric_name: str
-    definition: str
-    margin: Callable[[pd.Series, pd.Timestamp], float | None] | None = None
-    min_margin: float = 0.0
-    materiality: str = "none"
-    lookback_months: int = 1  # how far before the target the answer reads data
-    # Optional second quantity reported in notes (e.g. the weakest-12m comparison).
-    metric2: Callable[[pd.Series, pd.Timestamp], float | None] | None = None
-    metric2_name: str = ""
-    # Non-trivial control cap, in margin units (None: no cap).
-    control_cap: float | None = None
+    series_id: str
+    thresholds: tuple[float, ...]
+    offsets: tuple[int, ...]
+    quantity: Callable[[Snapshot, date], float | None]
+    gold_fn: Callable[[Snapshot, date, float], bool | None]
+    direction: int
+    margin: float
+    cap: float
+    question_fn: Callable[[str, float], str]
+    quantity_doc: str
+    margin_doc: str
+    cutoff_offset: float = 0.0
+    quarterly: bool = False
+
+    def gold(self, s: Snapshot, period: date, threshold: float) -> bool | None:
+        return self.gold_fn(s, period, threshold)
+
+    def distance(self, s: Snapshot, period: date, threshold: float) -> float | None:
+        """Signed distance of the deciding quantity from the cutoff; > 0 iff Yes."""
+        q = self.quantity(s, period)
+        if q is None:
+            return None
+        return self.direction * (q - (threshold + self.cutoff_offset))
+
+    def question(self, period: date, threshold: float) -> str:
+        return self.question_fn(period_label(period, self.quarterly), threshold)
+
+    def key_observations(self, period: date) -> list[date]:
+        return [shift(period, k) for k in self.offsets]
+
+    def window(self, period: date) -> tuple[date, ...]:
+        """All observation dates from the earliest key observation through the period."""
+        step = 3 if self.quarterly else 1
+        lo = min(self.offsets)
+        return tuple(shift(period, k) for k in range(lo, 1, step))
 
 
-def fell_vs_prior_month_template(label: str, key: str = "mom-fall") -> Template:
-    """'Did <label> fall in <month> versus the prior month?' (INDPRO; reusable in tests)."""
-    return Template(
-        key=key,
-        months_per_period=1,
-        question=lambda t: (
-            f"Did {label} fall in {_month(t)} versus the prior month, i.e. was its "
-            f"level in {_month(t)} lower than in {_month(_shift(t, -1))}?"
-        ),
-        gold=fell_vs_prior_month,
-        metric=lambda s, t: pct_change(s, t),
-        metric_name="one-month % change",
-        definition="yes iff level(t) < level(t-1 month); a tie is no.",
-        margin=mom_pct_margin,
-        min_margin=PCT_MARGIN,
-        materiality="|100 * (level(t) / level(t-1 month) - 1)| >= 0.05",
-        control_cap=10.0,
-    )
-
-
-def _payrolls_3m_template(threshold_k: int) -> Template:
-    return Template(
-        key=f"avg3m-above-{threshold_k}k",
-        months_per_period=1,
-        question=lambda t: (
-            "Was average monthly payroll growth over the 3 months ending "
-            f"{_month(t)} above {threshold_k}k, i.e. is (level({_month(t)}) - "
-            f"level({_month(_shift(t, -3))})) / 3 above {threshold_k}, with total nonfarm "
-            "payrolls (PAYEMS) in thousands of jobs?"
-        ),
-        gold=lambda s, t: payrolls_3m_avg_above(s, t, threshold_k),
-        metric=avg_change_3m,
-        metric_name="3-month average change (thousands)",
-        definition=(
-            f"PAYEMS in thousands; yes iff (level(t) - level(t-3 months)) / 3 > "
-            f"{threshold_k}; a tie is no."
-        ),
-        margin=lambda s, t: payrolls_3m_margin(s, t, threshold_k),
-        min_margin=PAYROLL_MARGIN_K,
-        materiality=f"|3-month average - {threshold_k}| >= 1 (thousand)",
-        lookback_months=3,
-        control_cap=40.0,
-    )
-
-
-TEMPLATES: dict[str, tuple[Template, ...]] = {
-    "GDPC1": (
-        Template(
-            key="qoq-shrink",
-            months_per_period=3,
-            question=lambda t: (
-                f"Did real GDP shrink in {_quarter(t)}, i.e. was real GDP (GDPC1) in "
-                f"{_quarter(t)} lower than in {_quarter(_shift(t, -3))}?"
-            ),
-            gold=real_gdp_shrank,
-            metric=lambda s, t: pct_change(s, t, months=3),
-            metric_name="quarter-over-quarter % change (non-annualized)",
-            definition="yes iff level(q) < level(q-1 quarter); a tie is no.",
-            margin=gdp_margin,
-            min_margin=PCT_MARGIN,
-            materiality=(
-                "|QoQ % change, non-annualized| >= 0.05 (about 0.2pp annualized; stricter "
-                "than half the 0.1 publication unit)"
-            ),
-            lookback_months=3,
-            control_cap=5.0,
-        ),
-        Template(
-            key="growth-above-2",
-            months_per_period=3,
-            question=lambda t: (
-                f"Did real GDP grow faster than 2% (annualized) in {_quarter(t)}, i.e. was "
-                f"the annualized growth rate of real GDP (GDPC1) from {_quarter(_shift(t, -3))} "
-                f"to {_quarter(t)}, 100 * ((level({_quarter(t)}) / "
-                f"level({_quarter(_shift(t, -3))}))^4 - 1), above 2.0%?"
-            ),
-            gold=real_gdp_grew_faster_than,
-            metric=annualized_qoq_pct,
-            metric_name="annualized QoQ growth (%)",
-            definition=(
-                "yes iff 100 * ((level(q) / level(q-1 quarter))^4 - 1) > 2.0, unrounded; "
-                "a tie is no."
-            ),
-            margin=gdp_growth_margin,
-            min_margin=GDP_ANNUALIZED_MARGIN,
-            materiality=(
-                "|annualized QoQ growth - 2.0| >= 0.2 (percentage points; the annualized "
-                "equivalent of the 0.05 non-annualized GDP margin)"
-            ),
-            lookback_months=3,
-            control_cap=10.0,
-        ),
+TEMPLATE_LIST: tuple[Template, ...] = (
+    Template(
+        key="gdp_shrink", series_id="ROUTPUT", thresholds=(0.0,), offsets=(-3, 0),
+        quantity=annualized_qoq_pct, gold_fn=lambda s, q, thr: real_gdp_shrank(s, q),
+        direction=-1, margin=0.05, cap=1.0, quarterly=True,
+        question_fn=lambda p, thr: f"Did US real GDP shrink in {p}?",
+        quantity_doc="annualized quarter-over-quarter % change of the real GDP level; "
+        "Yes iff below 0 (the level fell)",
+        margin_doc="0.05 pp (half the 0.1 pp unit of published annualized growth)",
     ),
-    "PAYEMS": (
-        Template(
-            key="weakest-12m",
-            months_per_period=1,
-            question=lambda t: (
-                f"Was {_month(t)} the weakest of the 12 months ending in {_month(t)} "
-                f"for payroll growth, i.e. is change({_month(t)}) lower than each of "
-                f"change({_month(_shift(t, -11))}) through change({_month(_shift(t, -1))}), "
-                "where change(month) = level(month) - level(previous month), with total "
-                "nonfarm payrolls (PAYEMS) in thousands of jobs?"
-            ),
-            gold=payrolls_weakest_in_12m,
-            metric=lambda s, t: change(s, t),
-            metric_name="one-month change (thousands)",
-            metric2=prior_11_min_change,
-            metric2_name="minimum one-month change of the prior 11 months (thousands)",
-            definition=(
-                "yes iff change(t) is strictly lower than each of change(t-1) .. "
-                "change(t-11), where change(m) = level(m) - level(m-1); any tie is no."
-            ),
-            margin=payrolls_weakest_margin,
-            min_margin=PAYROLL_MARGIN_K,
-            materiality="|change(t) - min(change(t-11) .. change(t-1))| >= 1 (thousand)",
-            lookback_months=12,
-            control_cap=40.0,
+    Template(
+        key="gdp_growth_above", series_id="ROUTPUT", thresholds=(2.0,), offsets=(-3, 0),
+        quantity=annualized_qoq_pct, gold_fn=real_gdp_grew_faster_than,
+        direction=1, margin=0.05, cap=1.0, quarterly=True,
+        question_fn=lambda p, thr: (
+            f"Did US real GDP grow faster than a {_pct(thr)} annual rate in {p}?"
         ),
-        _payrolls_3m_template(100),
-        _payrolls_3m_template(150),
+        quantity_doc="annualized quarter-over-quarter % change of the real GDP level; "
+        "Yes iff above the threshold",
+        margin_doc="0.05 pp",
     ),
-    "INDPRO": (fell_vs_prior_month_template("industrial production (INDPRO)"),),
-    "PCEPI": (
-        Template(
-            key="yoy-above-2.5",
-            months_per_period=1,
-            question=lambda t: (
-                f"Is PCE inflation (year over year) above 2.5% for {_month(t)}, i.e. "
-                f"is the 12-month percent change in the PCE price index (PCEPI) from "
-                f"{_month(_shift(t, -12))} to {_month(t)}, 100 * (level({_month(t)}) / "
-                f"level({_month(_shift(t, -12))}) - 1), above 2.5?"
-            ),
-            gold=lambda s, t: pce_yoy_above(s, t, 2.5),
-            metric=yoy_pct,
-            metric_name="12-month % change",
-            definition="yes iff 100 * (level(t) / level(t-12 months) - 1) > 2.5, unrounded.",
-            margin=lambda s, t: pce_margin(s, t, 2.5),
-            min_margin=PCT_MARGIN,
-            materiality="|12-month % change - 2.5| >= 0.05 (percentage points)",
-            lookback_months=12,
-            control_cap=10.0,
+    Template(
+        key="payroll_weakest_12m", series_id="EMPLOY", thresholds=(0.0,),
+        offsets=tuple(range(-12, 1)), quantity=weakest_gap,
+        gold_fn=lambda s, t, thr: payrolls_weakest_in_12m(s, t),
+        direction=-1, margin=0.5, cap=35.0,
+        question_fn=lambda p, thr: (
+            f"Was {p} the weakest month for US job growth (nonfarm payrolls) in the "
+            f"12 months through {p}?"
         ),
+        quantity_doc="payroll change in the month (level difference, thousands) minus "
+        "the smallest change of the 11 preceding months; Yes iff below 0",
+        margin_doc="0.5 thousand (half the published 1 thousand unit)",
     ),
-    "UNRATE": (
-        Template(
-            key="mom-rise",
-            months_per_period=1,
-            question=lambda t: (
-                f"Did the unemployment rate (UNRATE) rise in {_month(t)} versus the "
-                f"prior month, i.e. was it higher than in {_month(_shift(t, -1))} "
-                "(as published, to one decimal place)?"
-            ),
-            gold=unrate_rose,
-            metric=lambda s, t: change(s, t),
-            metric_name="one-month change (percentage points)",
-            definition="yes iff round(rate(t), 1) > round(rate(t-1 month), 1); equal is no.",
-            materiality="none (compared at the published 0.1 precision)",
+    Template(
+        key="payroll_avg3m_above", series_id="EMPLOY", thresholds=(100.0, 150.0),
+        offsets=(-3, 0), quantity=avg_change_3m, gold_fn=payrolls_3m_avg_above,
+        direction=1, margin=0.5, cap=35.0,
+        question_fn=lambda p, thr: (
+            f"Did US employers add more than {_jobs(thr)} jobs a month on average "
+            f"(nonfarm payrolls) in the three months through {p}?"
         ),
+        quantity_doc="(level(t) - level(t-3)) / 3 in thousands; Yes iff above the "
+        "threshold",
+        margin_doc="0.5 thousand",
     ),
-}
+    Template(
+        key="ip_fell", series_id="IPT", thresholds=(0.0,), offsets=(-1, 0),
+        quantity=lambda s, t: pct_change(s, t),
+        gold_fn=lambda s, t, thr: industrial_production_fell(s, t),
+        direction=-1, margin=0.05, cap=0.3,
+        question_fn=lambda p, thr: f"Did US industrial production fall in {p}?",
+        quantity_doc="month-over-month % change of the IP index; Yes iff below 0 (the "
+        "level fell)",
+        margin_doc="0.05 pp (half the published 0.1% unit)",
+    ),
+    Template(
+        key="cpi_12m_above", series_id="PCPI", thresholds=(2.0, 2.5, 3.0),
+        offsets=(-12, 0), quantity=yoy_pct, gold_fn=cpi_12m_above,
+        direction=1, margin=0.05, cap=0.25,
+        question_fn=lambda p, thr: (
+            f"Was US consumer price inflation (CPI) above {_pct(thr)} over the 12 "
+            f"months through {p}?"
+        ),
+        quantity_doc="12-month % change of the seasonally adjusted CPI index; Yes iff "
+        "above the threshold",
+        margin_doc="0.05 pp (half the published 0.1 pp unit)",
+    ),
+    Template(
+        key="cpi_1m_above", series_id="PCPI", thresholds=(0.2, 0.3),
+        offsets=(-1, 0), quantity=lambda s, t: pct_change(s, t), gold_fn=cpi_1m_above,
+        direction=1, margin=0.05, cap=0.1,
+        question_fn=lambda p, thr: (
+            f"Did US consumer prices (CPI) rise by more than {_pct(thr)} in {p}?"
+        ),
+        quantity_doc="month-over-month % change of the seasonally adjusted CPI index; "
+        "Yes iff above the threshold",
+        margin_doc="0.05 pp",
+    ),
+    Template(
+        key="unemployment_rose", series_id="RUC", thresholds=(0.0,), offsets=(-1, 0),
+        quantity=rounded_change, gold_fn=lambda s, t, thr: unemployment_rose(s, t),
+        direction=1, margin=0.05, cap=0.15, cutoff_offset=0.05,
+        question_fn=lambda p, thr: f"Did the US unemployment rate rise in {p}?",
+        quantity_doc="month-over-month change of the rate rounded to its published "
+        "0.1 pp; Yes iff it rose (by at least 0.1); unchanged is No. The distance is "
+        "measured from 0.05, midway between unchanged and +0.1",
+        margin_doc="0.05 pp (always met: changes are multiples of 0.1)",
+    ),
+)  # fmt: skip
+TEMPLATES: dict[str, Template] = {t.key: t for t in TEMPLATE_LIST}
 
 
-# ---------------------------------------------------------------------------
-# Candidate generation
-# ---------------------------------------------------------------------------
+def templates_for(series_id: str) -> list[Template]:
+    return [t for t in TEMPLATE_LIST if t.series_id == series_id]
 
 
-def revision_date_for(as_of: date, vintages: list[date]) -> date | None:
-    """First vintage >= as_of + 1 year; else the latest vintage after as_of; else None."""
-    later = sorted(v for v in vintages if v > as_of)
-    if not later:
-        return None
-    target = (pd.Timestamp(as_of) + pd.DateOffset(years=1)).date()
-    return next((v for v in later if v >= target), later[-1])
+def _threshold_tag(tp: Template, thr: float) -> str:
+    if len(tp.thresholds) == 1:
+        return ""
+    if tp.series_id == "EMPLOY":
+        return f"-{thr:g}k"
+    return f"-{thr:g}pct"
 
 
-def _materiality_note(template: Template) -> str:
-    if template.margin is None:
-        return f"Materiality filter: {template.materiality}."
-    return f"Kept only if, in both vintages, {template.materiality}."
+def task_id(tp: Template, period: date, thr: float) -> str:
+    p = f"{period.year}q{(period.month - 1) // 3 + 1}" if tp.quarterly else f"{period:%Y-%m}"
+    return f"{tp.series_id.lower()}-{tp.key}{_threshold_tag(tp, thr)}-{p}"
 
 
-def _fmt(x: float | None) -> str:
-    return "n/a" if x is None else f"{x:.4g}"
+# --- Task -------------------------------------------------------------------------------
+
+DEFINITION_FIELDS: tuple[str, ...] = (
+    "id", "series_id", "template", "period", "threshold", "as_of_date", "revision_date",
+    "question", "answer_type", "kind", "notes",
+)  # fmt: skip
 
 
-def _task_id(series_id: str, template: Template, t: pd.Timestamp) -> str:
-    return f"{series_id.lower()}-{template.key}-{pd.Timestamp(t):%Y-%m}"
+@dataclass(frozen=True)
+class Task:
+    """One task. Definition fields are stored in tasks/v1.jsonl; the computed fields
+    (gold_as_of, gold_revised, flips, margin_as_of, margin_revised = signed distances)
+    are filled by :func:`load_tasks` / :func:`evaluate` from the local vintages and never
+    written to disk. Dates are ISO strings; ``period`` is the first day of the observed
+    month or quarter."""
+
+    id: str
+    series_id: str
+    template: str
+    period: str
+    threshold: float
+    as_of_date: str
+    revision_date: str
+    question: str
+    answer_type: str
+    kind: str
+    notes: str = ""
+    gold_as_of: bool | None = None
+    gold_revised: bool | None = None
+    flips: bool | None = None
+    margin_as_of: float | None = None
+    margin_revised: float | None = None
+
+    def definition(self) -> dict[str, Any]:
+        d = asdict(self)
+        return {k: d[k] for k in DEFINITION_FIELDS}
 
 
-def build_candidates(series_ids: Iterable[str], root: Path) -> list[Task]:
-    """Generate all candidate tasks from the SPEC §3 templates for ``series_ids``.
-
-    ``root`` is the vintage data directory. Gold answers are computed from vintages
-    via :func:`vintagebench.data.get_as_of` (date rules in the module docstring).
-    """
-    out: list[Task] = []
-    for series_id in series_ids:
-        if series_id not in TEMPLATES:
-            raise ValueError(f"no task template for series {series_id!r}")
-        out.extend(_series_candidates(series_id, root))
-    return out
+def template_of(task: Any) -> Template:
+    return TEMPLATES[task.template]
 
 
-def _series_candidates(series_id: str, root: Path) -> list[Task]:
-    raw = data.load_vintages(series_id, root)
-    first_release = raw.groupby("observation_date")["vintage_date"].min()
-    vintages = sorted(pd.Timestamp(v).date() for v in data.vintage_dates(series_id, root))
-    snapshots: dict[date, pd.Series] = {}
-
-    def snap(d: date) -> pd.Series:
-        if d not in snapshots:
-            snapshots[d] = data.get_as_of(series_id, d, root)
-        return snapshots[d]
-
-    tasks: list[Task] = []
-    for obs, first in sorted(first_release.items()):
-        t = pd.Timestamp(obs)
-        if not FIRST_YEAR <= t.year <= LAST_YEAR:
-            continue
-        as_of = pd.Timestamp(first).date()
-        if as_of < BASELINE_CUTOFF:
-            continue  # pre-2016 baseline vintage: not a genuine first release
-        revised = revision_date_for(as_of, vintages)
-        if revised is None:
-            continue
-        for template in TEMPLATES[series_id]:
-            if (t.month - 1) % template.months_per_period:
-                continue
-            task = _make_task(series_id, template, t, as_of, revised, snap)
-            if task is not None:
-                tasks.append(task)
-    return tasks
+def _period(task: Any) -> date:
+    return _d(task.period)
 
 
-def _make_task(
-    series_id: str,
-    template: Template,
-    t: pd.Timestamp,
-    as_of: date,
-    revised: date,
-    snap: Callable[[date], pd.Series],
-) -> Task | None:
-    s_as_of, s_rev = snap(as_of), snap(revised)
-    gold_as_of, gold_rev = template.gold(s_as_of, t), template.gold(s_rev, t)
-    if gold_as_of is None or gold_rev is None:
-        return None  # missing data in either vintage: skip, never guess
-    if template.margin is not None and not all(
-        is_material(template.margin(s, t), template.min_margin) for s in (s_as_of, s_rev)
-    ):
-        return None  # answer hinges on a difference below published precision
-    notes = (
-        f"Definition: {template.definition} {_materiality_note(template)} "
-        "as_of_date = first release of the target observation; "
-        "revision_date = first vintage >= 1 year later (else latest). "
-        f"{template.metric_name}: as-of {_fmt(template.metric(s_as_of, t))}, "
-        f"revised {_fmt(template.metric(s_rev, t))}."
-    )
-    if template.metric2 is not None:
-        notes += (
-            f" {template.metric2_name}: as-of {_fmt(template.metric2(s_as_of, t))}, "
-            f"revised {_fmt(template.metric2(s_rev, t))}."
-        )
-    dist = _distances(template, s_as_of, s_rev, t)
-    if dist is not None:
-        notes += f" {DISTANCE_LABEL}: as-of {dist[0]:.4f}, revised {dist[1]:.4f}."
-    task = Task(
-        id=_task_id(series_id, template, t),
-        series_id=series_id,
-        as_of_date=as_of.isoformat(),
-        question=template.question(t),
-        answer_type="yes_no",
-        gold_as_of=bool(gold_as_of),
-        revision_date=revised.isoformat(),
-        gold_revised=bool(gold_rev),
-        flips=bool(gold_as_of) != bool(gold_rev),
-        notes=notes,
-    )
-    if dist is not None:
-        _attach_distances(task, dist)
-    return task
+def key_observations(task: Any) -> list[date]:
+    """Observation dates the task's gold depends on (memorization probe)."""
+    return template_of(task).key_observations(_period(task))
 
 
-DISTANCE_LABEL = "Distance from threshold in margin units"
-_DIST_ATTR = "_threshold_distances"  # internal, not a dataclass field: never serialized
+def computation_window(task: Any) -> tuple[date, ...]:
+    """All observation dates spanned by the task's computation (overlap, COVID)."""
+    return template_of(task).window(_period(task))
 
 
-def _distances(
-    template: Template, s_as_of: pd.Series, s_rev: pd.Series, t: pd.Timestamp
-) -> tuple[float, float] | None:
-    """Unrounded (as-of, revised) |quantity - threshold| / margin; None if no margin."""
-    if template.margin is None or template.min_margin <= 0:
-        return None
-    a, r = template.margin(s_as_of, t), template.margin(s_rev, t)
-    if a is None or r is None:
-        return None
-    return a / template.min_margin, r / template.min_margin
+def implied_answer(task: Any, values: Mapping[Any, Any]) -> bool | None:
+    """The task's gold function applied to arbitrary values {date: value} (e.g. a
+    model's values_used). None if a needed observation is missing."""
+    tp = template_of(task)
+    return tp.gold(as_snapshot(values), _period(task), float(task.threshold))
 
 
-def _attach_distances(task: Task, dist: tuple[float, float]) -> None:
-    object.__setattr__(task, _DIST_ATTR, dist)  # frozen dataclass: internal cache only
+def touches_covid(tp: Template, period: date) -> bool:
+    lo, hi = COVID_MONTHS
+    if tp.quarterly:  # 2020 Q1 .. 2021 Q1 (quarters are dated by their first month)
+        lo, hi = date(2020, 1, 1), date(2021, 1, 1)
+    return any(lo <= d <= hi for d in tp.window(period))
 
 
-# ---------------------------------------------------------------------------
-# Pilot selection
-# ---------------------------------------------------------------------------
+def covid_window_overlap(task: Any) -> bool:
+    return touches_covid(template_of(task), _period(task))
 
 
-def _period_key(task: Task) -> str:
-    """Target period 'YYYY-MM' (from the id suffix; falls back to as_of_date)."""
-    suffix = task.id[-7:]
-    if len(suffix) == 7 and suffix[4] == "-" and suffix.replace("-", "").isdigit():
-        return suffix
-    return task.as_of_date[:7]
-
-
-def _template_key(task: Task) -> str:
-    return task.id[: -len(_period_key(task)) - 1] if task.id.endswith(_period_key(task)) else ""
-
-
-# COVID collapse periods (observation dates) that make a control trivially decided.
-COVID_MONTHS = (date(2020, 3, 1), date(2020, 6, 1))  # monthly series, inclusive
-# Quarters containing a COVID month (2020 Q1 holds March, Q2 holds Apr-Jun) plus the
-# rebound quarter 2020 Q3. 2020 Q4 is excluded via its one-quarter lookback to Q3.
-COVID_QUARTERS = frozenset({date(2020, 1, 1), date(2020, 4, 1), date(2020, 7, 1)})
-
-
-def template_for(task: Task) -> Template | None:
-    """The template that generated ``task`` (from its id), or None if unknown."""
-    key = _template_key(task)
-    for tp in TEMPLATES.get(task.series_id, ()):
-        if f"{task.series_id.lower()}-{tp.key}" == key:
-            return tp
-    return None
-
-
-def covid_window_overlap(task: Task) -> bool:
-    """True iff any observation the task's answer reads is in the COVID collapse.
-
-    The window is the target period and every period up to ``lookback_months``
-    before it (step = the template's period length). Monthly: any month 2020-03 ..
-    2020-06; quarterly: 2020 Q1 or Q2 (they contain such a month) or the rebound
-    quarter 2020 Q3. Unknown templates use the target alone.
-    """
-    window = computation_window(task)
-    tp = template_for(task)
-    if tp is not None and tp.months_per_period == 3:
-        return any(d in COVID_QUARTERS for d in window)
-    return any(COVID_MONTHS[0] <= d <= COVID_MONTHS[1] for d in window)
-
-
-def computation_window(task: Task) -> tuple[date, ...]:
-    """Observation periods the task's answer depends on, oldest first.
-
-    The target period and every period up to the template's ``lookback_months``
-    before it, in steps of the period length: 2 months for month-over-month
-    questions, 2 quarters for GDP, 4 months for the payroll 3-month average and 13
-    months for weakest-of-12 and PCE YoY (the whole span, not only the two levels
-    read, since every month in it feeds the deciding change). Unknown templates use
-    the target alone.
-    """
-    tp = template_for(task)
-    lookback = tp.lookback_months if tp else 0
-    step = tp.months_per_period if tp else 1
-    t = pd.Timestamp(_period_key(task) + "-01")
-    return tuple(_shift(t, -k).date() for k in range(lookback - lookback % step, -1, -step))
-
-
-def windows_overlap(a: Task, b: Task) -> bool:
-    """True iff ``a`` and ``b`` are in the same series and their windows intersect."""
+def windows_overlap(a: Any, b: Any) -> bool:
+    """Same series and at least one shared observation in the computation windows."""
     return a.series_id == b.series_id and bool(
         set(computation_window(a)) & set(computation_window(b))
     )
 
 
-def task_clusters(rows: Iterable[Task]) -> dict[str, str]:
-    """Cluster label per task id: connected components of the overlap graph.
+def task_clusters(rows: Iterable[Any]) -> dict[str, str]:
+    """id -> cluster label: connected components of same-series window overlap,
+    labelled '<SERIES>-<n>' in order of earliest window date (order-independent)."""
+    rows = sorted(rows, key=lambda r: (r.series_id, min(computation_window(r)), r.id))
+    parent = {r.id: r.id for r in rows}
 
-    Two tasks are linked iff :func:`windows_overlap` (same series, intersecting
-    windows). The label is ``<SERIES>:<first>..<last>``, the YYYY-MM span of the
-    union of the component's windows; components in one series have disjoint
-    spans, so labels are unique. A task overlapping nothing is its own cluster.
-    """
-    items = sorted({t.id: t for t in rows}.values(), key=lambda t: t.id)
-    parent = list(range(len(items)))
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for i, a in enumerate(items):
-        for j in range(i + 1, len(items)):
-            if windows_overlap(a, items[j]):
-                parent[find(i)] = find(j)
-    members: dict[int, list[Task]] = {}
-    for i, t in enumerate(items):
-        members.setdefault(find(i), []).append(t)
+    for i, a in enumerate(rows):
+        for b in rows[i + 1 :]:
+            if windows_overlap(a, b):
+                parent[find(b.id)] = find(a.id)
+    labels: dict[str, str] = {}
+    counters: Counter[str] = Counter()
     out: dict[str, str] = {}
-    for group in members.values():
-        days = [d for t in group for d in computation_window(t)]
-        label = f"{group[0].series_id}:{min(days):%Y-%m}..{max(days):%Y-%m}"
-        out.update({t.id: label for t in group})
+    for r in rows:
+        root = find(r.id)
+        if root not in labels:
+            counters[r.series_id] += 1
+            labels[root] = f"{r.series_id}-{counters[r.series_id]}"
+        out[r.id] = labels[root]
     return out
 
 
-def threshold_distances(task: Task, root: Path | None = None) -> tuple[float, float]:
-    """Unrounded (as-of, revised) distance from the threshold in margin units.
-
-    Uses the value computed by :func:`build_candidates` when present; otherwise
-    (e.g. after :func:`load_tasks`) recomputes it from the vintage data under
-    ``root`` (default ``data.DATA_DIR``) and caches it on the task. Raises
-    ``ValueError`` if the template has no margin or the data cannot provide it.
-    """
-    cached = getattr(task, _DIST_ATTR, None)
-    if cached is not None:
-        return cached
-    tp = template_for(task)
-    if tp is None or tp.margin is None:
-        raise ValueError(f"{task.id}: no template margin to compute a distance")
-    t = pd.Timestamp(_period_key(task) + "-01")
-    src = data.DATA_DIR if root is None else root
-    try:
-        snaps = [
-            data.get_as_of(task.series_id, date.fromisoformat(d), src)
-            for d in (task.as_of_date, task.revision_date)
-        ]
-    except (OSError, ValueError, KeyError) as exc:
-        raise ValueError(f"{task.id}: cannot load vintages to compute distance") from exc
-    dist = _distances(tp, snaps[0], snaps[1], t)
-    if dist is None or not all(math.isfinite(x) for x in dist):
-        raise ValueError(f"{task.id}: distance from threshold is missing in the data")
-    _attach_distances(task, dist)
-    return dist
+def overlap_pairs(rows: list[Any]) -> int:
+    return sum(windows_overlap(a, b) for i, a in enumerate(rows) for b in rows[i + 1 :])
 
 
-def trivial_control(task: Task, root: Path | None = None) -> bool:
-    """True iff ``task`` is a non-UNRATE control that is far from the line in BOTH
-    vintages: unrounded distance > the template's ``control_cap`` (margin units).
-
-    Flips, UNRATE controls and templates without a cap are never trivial. For a
-    capped template the distance is required: if it is neither attached nor
-    computable from the data, :func:`threshold_distances` raises ``ValueError``.
-    """
-    if task.flips or task.series_id == CONTROL_SERIES:
-        return False
-    tp = template_for(task)
-    if tp is None or tp.control_cap is None:
-        return False
-    return min(threshold_distances(task, root)) > tp.control_cap
+# --- snapshots from the vintages --------------------------------------------------------
 
 
-def _eligible_control(task: Task) -> bool:
-    return not covid_window_overlap(task) and not trivial_control(task)
+class Vintages:
+    """All vintages of one series as {vintage_date: {observation_date: value}}."""
+
+    def __init__(self, series_id: str, root: Path | str = data.RAW_DIR) -> None:
+        df = data.load_vintages(series_id, root)
+        self.series_id = series_id
+        self.snaps: dict[date, dict[date, float]] = {}
+        for vd, g in df.groupby("vintage_date", sort=True):
+            self.snaps[_d(vd)] = as_snapshot(
+                dict(zip(g["observation_date"], g["value"], strict=True))
+            )
+        self.dates: list[date] = sorted(self.snaps)
+
+    def as_of(self, d: date) -> dict[date, float]:
+        known = [v for v in self.dates if v <= d]
+        return self.snaps[known[-1]] if known else {}
+
+    def first_containing(self, obs: date) -> date | None:
+        return next((v for v in self.dates if obs in self.snaps[v]), None)
 
 
-def select_pilot(candidates: list[Task], n: int = 20, seed: int = 0) -> list[Task]:
-    """Select a seeded, balanced pilot set (~half flips, spread across series/years).
+# --- candidates -------------------------------------------------------------------------
 
-    Algorithm: drop duplicate ids and targets outside 2016–2025; shuffle with
-    ``random.Random(seed)``. Stratify on (flips, gold_as_of) so that the as-of
-    answer is ~half Yes / ~half No within flips and within controls:
 
-    - flips (non-UNRATE): ``n // 2``, split Yes/No as evenly as possible;
-    - UNRATE controls: exactly 2 (one Yes, one No when available);
-    - other controls: the rest, split so controls overall are ~half Yes.
+@dataclass(frozen=True)
+class Candidate:
+    """One (series, template, period, threshold) instance with its golds and signed
+    distances at first release, one year later and in the latest vintage."""
 
-    Controls whose window overlaps the COVID collapse (:func:`covid_window_overlap`)
-    and non-UNRATE controls far from the line in both vintages
-    (:func:`trivial_control`) are never selected; flips are unaffected.
+    template: str
+    series_id: str
+    period: date
+    threshold: float
+    as_of: date
+    latest: date
+    year_later: date | None
+    gold_first: bool
+    gold_year: bool | None
+    gold_latest: bool | None
+    dist_first: float
+    dist_year: float | None
+    dist_latest: float | None
+    no_change_until: date | None
 
-    Strata are filled round-robin, one task at a time; each pick is greedy: the
-    candidate whose series is least used among already chosen tasks with the same
-    flips value, then whose series, template and year are least used overall (in
-    that order), ties broken by the shuffled order. At most one task per (series,
-    target period). A short stratum is filled first from its sibling (same group,
-    other answer), then from any non-UNRATE candidate; every shortfall is reported
-    in a warning. Output is sorted by id.
-    """
-    pool = _shuffled_pool(candidates, seed)
-    quotas = _strata_quotas(n, min(N_CONTROL_SERIES, n - n // 2))
-    picker = _Picker()
-    got = _fill(pool, quotas, picker, n)
-    chosen = picker.chosen[:n]  # quotas sum to n; the slice is only a guard
-    short = [f"{name} {got[name]}/{quota}" for name, quota in quotas.items() if got[name] < quota]
-    if short or len(chosen) < n:
-        n_flips = sum(t.flips for t in chosen)
-        n_yes = sum(bool(t.gold_as_of) for t in chosen)
-        warnings.warn(
-            f"select_pilot: strata short (got/wanted): {', '.join(short) or 'none'}; "
-            f"got {len(chosen)}/{n} tasks: {n_flips} flips, {n_yes} as-of Yes.",
-            stacklevel=2,
+    @property
+    def tp(self) -> Template:
+        return TEMPLATES[self.template]
+
+    @property
+    def id(self) -> str:
+        return task_id(self.tp, self.period, self.threshold)
+
+    @property
+    def covid(self) -> bool:
+        return touches_covid(self.tp, self.period)
+
+    @property
+    def gap_ok(self) -> bool:
+        return (self.latest - self.as_of).days >= MIN_REVISION_GAP_DAYS
+
+    def material(self, dist: float | None) -> bool:
+        return dist is not None and abs(dist) >= self.tp.margin - EPS
+
+    def within_cap(self, dist: float | None) -> bool:
+        return dist is not None and abs(dist) <= self.tp.cap + EPS
+
+    @property
+    def flips_latest(self) -> bool | None:
+        return None if self.gold_latest is None else self.gold_latest != self.gold_first
+
+
+def _instance(
+    v: Vintages, tp: Template, period: date, thr: float, baseline: date
+) -> Candidate | None:
+    first = v.first_containing(period)
+    if first is None or first <= baseline:
+        return None
+    s0 = v.snaps[first]
+    g0, d0 = tp.gold(s0, period, thr), tp.distance(s0, period, thr)
+    if g0 is None or d0 is None:
+        return None
+    latest = v.dates[-1]
+    later = [x for x in v.dates if x >= first + timedelta(days=MIN_REVISION_GAP_DAYS)]
+    yl = later[0] if later else None
+    sl, sy = v.snaps[latest], (v.snaps[yl] if yl else None)
+    window = tp.window(period)
+    run_end = None
+    for x in v.dates[v.dates.index(first) + 1 :]:
+        if any(v.snaps[x].get(o) != s0.get(o) for o in window):
+            break
+        run_end = x
+    return Candidate(
+        template=tp.key, series_id=tp.series_id, period=period, threshold=thr,
+        as_of=first, latest=latest, year_later=yl,
+        gold_first=g0, gold_year=None if sy is None else tp.gold(sy, period, thr),
+        gold_latest=tp.gold(sl, period, thr), dist_first=d0,
+        dist_year=None if sy is None else tp.distance(sy, period, thr),
+        dist_latest=tp.distance(sl, period, thr), no_change_until=run_end,
+    )  # fmt: skip
+
+
+def build_candidates(
+    series_ids: Iterable[str] = data.SERIES_IDS, root: Path | str = data.RAW_DIR
+) -> list[Candidate]:
+    """All instances (no filters) whose period is in 2016-2025 and first released after
+    the baseline vintage, computable at first release. Sorted by id."""
+    out: list[Candidate] = []
+    for sid in series_ids:
+        tps = templates_for(sid)
+        if not tps:
+            raise KeyError(f"no templates for series {sid!r}")
+        v = Vintages(sid, root)
+        baseline = v.dates[0]
+        periods = sorted(
+            {o for snap in v.snaps.values() for o in snap if PERIOD_START <= o <= PERIOD_END}
         )
-    return sorted(chosen, key=lambda t: t.id)
+        for tp in tps:
+            for p in periods:
+                if tp.quarterly and p.month % 3 != 1:
+                    continue
+                for thr in tp.thresholds:
+                    c = _instance(v, tp, p, thr, baseline)
+                    if c is not None:
+                        out.append(c)
+    return sorted(out, key=lambda c: c.id)
 
 
-def default_n_unrate(n_total: int) -> int:
-    """UNRATE controls for a set of ``n_total``: 2 per 20 tasks (at least 2), e.g. 6 of 60."""
-    n_ctrl = n_total - n_total // 2
-    return min(max(N_CONTROL_SERIES, round(n_total * N_CONTROL_SERIES / PILOT_N)), n_ctrl)
+# --- eligibility per kind ---------------------------------------------------------------
 
 
-def extend_pilot(
-    existing: list[Task],
-    candidates: list[Task],
-    n_total: int = 60,
-    seed: int = 0,
-    n_unrate: int | None = None,
-) -> list[Task]:
-    """Top up ``existing`` to ``n_total`` tasks with the :func:`select_pilot` logic.
+def flip_eligible(c: Candidate) -> bool:
+    return (
+        c.gap_ok and not c.covid and c.material(c.dist_first) and c.material(c.dist_latest)
+        and c.flips_latest is True
+    )  # fmt: skip
 
-    The existing tasks are kept exactly (same objects, never re-checked or
-    replaced). The strata quotas are those of a balanced set of ``n_total``: flips
-    ``n_total // 2`` split Yes/No on the as-of answer, ``n_unrate`` UNRATE controls
-    (default :func:`default_n_unrate`, i.e. 6 for 60) split Yes/No, and the other
-    controls split so controls overall are ~half Yes. Each stratum receives its
-    quota minus the existing tasks already in it. New tasks come from the seeded,
-    shuffled ``candidates`` under the same rules as :func:`select_pilot` (COVID
-    exclusion and non-trivial cap for controls, no UNRATE flips, 2016–2025 targets,
-    one task per (series, target period) including the existing tasks, no duplicate
-    ids) and the same greedy spread picker, whose usage counters start from the
-    existing tasks. Two extra rules apply to NEW tasks only:
 
-    - revision gap: revision_date - as_of_date >= 365 days (:func:`revision_gap_ok`);
-    - independence: the picker's first criterion is the number of already chosen
-      tasks (existing or new) whose :func:`computation_window` overlaps the
-      candidate's in the same series, so an overlapping task is picked only when no
-      non-overlapping candidate is left in the pool being drawn from (the stratum,
-      then its sibling fallback, then any non-UNRATE candidate).
+def control_eligible(c: Candidate) -> bool:
+    return (
+        c.gap_ok and not c.covid and c.material(c.dist_first) and c.material(c.dist_latest)
+        and c.flips_latest is False
+        and c.within_cap(c.dist_first) and c.within_cap(c.dist_latest)
+    )  # fmt: skip
 
-    Shortfalls fall back to the sibling stratum, then to any non-UNRATE candidate,
-    and are reported in a warning with the actual cells. Output: the existing tasks
-    first, in their given order, then the new tasks sorted by id (so the first
-    ``len(existing)`` rows are the base set).
+
+def no_change_eligible(c: Candidate) -> bool:
+    """Window identical in at least the next vintage; material; within the control cap
+    (non-trivial, like controls)."""
+    return (
+        c.no_change_until is not None and not c.covid and c.material(c.dist_first)
+        and c.within_cap(c.dist_first)
+    )  # fmt: skip
+
+
+ELIGIBLE: dict[str, Callable[[Candidate], bool]] = {
+    "flip": flip_eligible,
+    "control": control_eligible,
+    "no_change": no_change_eligible,
+}
+
+KIND_NOTES = {
+    "flip": "flip: the conclusion at first release differs from the pinned latest vintage.",
+    "control": "control: same conclusion at first release and in the pinned latest "
+    "vintage; deciding quantity within the control cap in both.",
+    "no_change": "no_change: every observation in the computation window is identical in "
+    "the as-of and revision vintages.",
+}
+
+
+def to_task(c: Candidate, kind: str) -> Task:
+    """Definition-only Task for a candidate (computed fields filled for convenience)."""
+    rev = c.no_change_until if kind == "no_change" else c.latest
+    assert rev is not None
+    gold_rev = c.gold_first if kind == "no_change" else c.gold_latest
+    dist_rev = c.dist_first if kind == "no_change" else c.dist_latest
+    return Task(
+        id=c.id, series_id=c.series_id, template=c.template, period=c.period.isoformat(),
+        threshold=float(c.threshold), as_of_date=c.as_of.isoformat(),
+        revision_date=rev.isoformat(), question=c.tp.question(c.period, c.threshold),
+        answer_type="yes_no", kind=kind, notes=KIND_NOTES[kind],
+        gold_as_of=c.gold_first, gold_revised=gold_rev, flips=c.gold_first != gold_rev,
+        margin_as_of=c.dist_first, margin_revised=dist_rev,
+    )  # fmt: skip
+
+
+def filter_counts(cands: list[Candidate]) -> dict[str, dict[str, int]]:
+    """Per series: candidate counts at each filter stage (for tasks/README.md)."""
+    out: dict[str, dict[str, int]] = defaultdict(Counter)  # type: ignore[arg-type]
+    for c in cands:
+        for key in (c.series_id, "all"):
+            row = out[key]
+            row["instances"] += 1
+            base = c.gap_ok and c.flips_latest is not None
+            row["gap_ok"] += base
+            mat = base and c.material(c.dist_first) and c.material(c.dist_latest)
+            row["material"] += mat
+            row["material_no_covid"] += mat and not c.covid
+            row["flip"] += flip_eligible(c)
+            row["control_uncapped"] += mat and not c.covid and c.flips_latest is False
+            row["control"] += control_eligible(c)
+            row["no_change_identical"] += c.no_change_until is not None and not c.covid
+            row["no_change"] += no_change_eligible(c)
+    return {k: dict(v) for k, v in out.items()}
+
+
+# --- selection --------------------------------------------------------------------------
+
+
+@dataclass
+class Selection:
+    tasks: list[Task]
+    shortfall: dict[str, int]
+    overlaps: int
+
+
+def _slots(kind: str, quotas: tuple[int, int]) -> list[bool]:
+    yes, no = quotas
+    out: list[bool] = []
+    for i in range(max(yes, no)):
+        if i < yes:
+            out.append(True)
+        if i < no:
+            out.append(False)
+    return out
+
+
+def select_v1_detailed(
+    candidates: list[Candidate],
+    seed: int = SEED,
+    quotas: Mapping[str, tuple[int, int]] = QUOTAS,
+) -> Selection:
+    """Greedy, seeded selection (see :func:`select_v1`); also returns the per-kind
+    shortfall (unfilled slots) and the number of overlapping same-series pairs."""
+    uniq: dict[str, Candidate] = {}
+    for c in sorted(candidates, key=lambda c: (c.id, repr(c))):
+        uniq.setdefault(c.id, c)  # duplicates: keep one, independent of input order
+    order = sorted(uniq)
+    random.Random(seed).shuffle(order)
+    rank = {cid: i for i, cid in enumerate(order)}
+    chosen: list[Task] = []
+    used: set[str] = set()
+    shortfall: dict[str, int] = {}
+    for kind in KINDS:
+        q = quotas[kind]
+        pool = [uniq[i] for i in order if ELIGIBLE[kind](uniq[i])]
+        if kind == "no_change":
+            n_yes = sum(c.gold_first for c in pool)
+            if n_yes < q[0] and len(pool) - n_yes >= q[0]:
+                q = (q[1], q[0])
+        mine: list[Task] = []
+        missing = 0
+        for want in _slots(kind, q):
+            best, best_key = None, None
+            for c in pool:
+                if c.id in used or c.gold_first != want:
+                    continue
+                t = to_task(c, kind)
+                key = _score(t, c, kind, chosen, mine, rank[c.id])
+                if best_key is None or key < best_key:
+                    best, best_key = t, key
+            if best is None:
+                missing += 1
+                continue
+            used.add(best.id)
+            mine.append(best)
+            chosen.append(best)
+        shortfall[kind] = missing
+    ordered = sorted(chosen, key=lambda t: (KINDS.index(t.kind), t.series_id, t.period, t.id))
+    return Selection(ordered, shortfall, overlap_pairs(ordered))
+
+
+def _score(
+    t: Task, c: Candidate, kind: str, chosen: list[Task], mine: list[Task], rank: int
+) -> tuple:
+    """Lower is better: avoid same-series window overlap first, then spread series,
+    the series' Yes/No answers, years and templates (within the kind, then overall),
+    then the seeded rank."""
+    year = c.period.year
+    return (
+        sum(windows_overlap(t, o) for o in chosen),
+        0
+        if kind != "no_change"
+        or (c.no_change_until - c.as_of).days  # type: ignore[operator]
+        >= NO_CHANGE_PREFERRED_GAP_DAYS
+        else 1,
+        sum(o.series_id == t.series_id for o in mine),
+        sum(o.series_id == t.series_id and o.gold_as_of == t.gold_as_of for o in mine),
+        sum(_d(o.period).year == year for o in mine),
+        sum(o.template == t.template for o in mine),
+        sum(o.series_id == t.series_id for o in chosen),
+        sum(_d(o.period).year == year for o in chosen),
+        rank,
+    )
+
+
+def select_v1(candidates: list[Candidate], seed: int = SEED) -> list[Task]:
+    """45 tasks = 20 flips, 20 controls, 5 no_change; as-of answers 10/10, 10/10, 3/2
+    (or 2/3). Each slot takes the eligible candidate that (1) overlaps the fewest
+    already-selected same-series computation windows, (for no_change: revision >= 90
+    days later preferred), then (2) has the fewest already-selected tasks of the same
+    series / series and as-of answer / year / template in its kind, then the same
+    series / year overall, then (3) the seeded rank.
+    Deterministic for a seed; independent of input order and duplicates."""
+    return select_v1_detailed(candidates, seed).tasks
+
+
+# --- persistence and load-time recomputation --------------------------------------------
+
+
+def save_tasks(path: Path | str, tasks: Iterable[Task]) -> None:
+    """Write definitions only (no golds, margins or data values; SPEC §2.3)."""
+    lines = [json.dumps(t.definition()) for t in tasks]
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text("\n".join(lines) + ("\n" if lines else ""))
+
+
+class TaskKindError(ValueError):
+    """A task's recomputed golds disagree with its stored kind."""
+
+
+def evaluate(task: Task, as_of: Snapshot, revised: Snapshot) -> Task:
+    """Fill the computed fields from the two snapshots and check them against kind.
+
+    Raises TaskKindError if a gold is not computable, the materiality rule fails, or the
+    computed kind disagrees with the stored one (flip: answers differ; control: answers
+    equal; no_change: answers equal and every window observation identical).
     """
-    keep = list({t.id: t for t in existing}.values())
-    if len(keep) != len(existing):
-        raise ValueError("extend_pilot: duplicate ids in the existing tasks")
-    if n_total < len(keep):
-        raise ValueError(f"extend_pilot: n_total={n_total} < {len(keep)} existing tasks")
-    n_unr = default_n_unrate(n_total) if n_unrate is None else n_unrate
-    totals = _strata_quotas(n_total, n_unr)
-    have = Counter(_stratum_name(t) for t in keep)
-    quotas = {name: max(q - have[name], 0) for name, q in totals.items()}
-    picker = _Picker(avoid_overlap=True)
-    for t in keep:
-        picker.add(t)
-    pool = [t for t in _shuffled_pool(candidates, seed) if revision_gap_ok(t)]
-    _fill(pool, quotas, picker, n_total)
-    chosen = picker.chosen[:n_total]
-    cells = Counter(_stratum_name(t) for t in chosen)
-    short = [f"{name} {cells[name]}/{q}" for name, q in totals.items() if cells[name] < q]
-    if short or len(chosen) < n_total:
-        actual = ", ".join(f"{name} {cells[name]}" for name in totals)
-        warnings.warn(
-            f"extend_pilot: strata short (got/wanted): {', '.join(short) or 'none'}; "
-            f"got {len(chosen)}/{n_total} tasks; actual cells: {actual}.",
-            stacklevel=2,
-        )
-    added = sorted(chosen[len(keep) :], key=lambda t: t.id)
-    return keep + added
+    tp, p, thr = template_of(task), _period(task), float(task.threshold)
+    g1, g2 = tp.gold(as_of, p, thr), tp.gold(revised, p, thr)
+    d1, d2 = tp.distance(as_of, p, thr), tp.distance(revised, p, thr)
+    if g1 is None or g2 is None or d1 is None or d2 is None:
+        raise TaskKindError(f"{task.id}: gold not computable from the vintages")
+    if min(abs(d1), abs(d2)) < tp.margin - EPS:
+        raise TaskKindError(f"{task.id}: materiality rule violated")
+    flips = g1 != g2
+    same = all(as_of.get(o) == revised.get(o) for o in tp.window(p))
+    if task.kind == "flip":
+        ok = flips
+    elif task.kind == "control":
+        ok = not flips
+    elif task.kind == "no_change":
+        ok = same and not flips
+    else:
+        raise TaskKindError(f"{task.id}: unknown kind {task.kind!r}")
+    if not ok:
+        computed = "flip" if flips else ("no_change" if same else "control")
+        raise TaskKindError(f"{task.id}: stored kind {task.kind!r}, computed {computed!r}")
+    return replace(
+        task, gold_as_of=g1, gold_revised=g2, flips=flips, margin_as_of=d1, margin_revised=d2
+    )
 
 
-MIN_REVISION_GAP_DAYS = 365  # extension tasks only (see extend_pilot)
-
-
-def revision_gap_ok(task: Task) -> bool:
-    """True iff revision_date - as_of_date >= :data:`MIN_REVISION_GAP_DAYS` days.
-
-    Excludes tasks that used the "else the latest vintage" fallback of the date
-    rule, whose revised answer could change when newer vintages are fetched.
-    """
-    gap = date.fromisoformat(task.revision_date) - date.fromisoformat(task.as_of_date)
-    return gap.days >= MIN_REVISION_GAP_DAYS
-
-
-STRATA = (  # (name, flips, as-of Yes, UNRATE), in fill order
-    ("flip/as-of Yes", True, True, False),
-    ("flip/as-of No", True, False, False),
-    (f"{CONTROL_SERIES} control/as-of Yes", False, True, True),
-    (f"{CONTROL_SERIES} control/as-of No", False, False, True),
-    ("control/as-of Yes", False, True, False),
-    ("control/as-of No", False, False, False),
-)
-_GROUPS = ((0, 1), (2, 3), (4, 5))  # sibling strata (flips, UNRATE controls, controls)
-
-
-def _stratum_name(task: Task) -> str | None:
-    """The stratum ``task`` belongs to (None: an UNRATE flip, which no stratum takes)."""
-    for name, flips, yes, unrate in STRATA:
-        if (
-            task.flips == flips
-            and bool(task.gold_as_of) == yes
-            and (task.series_id == CONTROL_SERIES) == unrate
-        ):
-            return name
-    return None
-
-
-def _strata_quotas(n: int, n_unr: int) -> dict[str, int]:
-    """Per-stratum quotas (in :data:`STRATA` order) for a balanced set of ``n``."""
-    n_flip = n // 2
-    n_ctrl = n - n_flip
-    n_other = n_ctrl - n_unr  # >= 0
-    ctrl_yes = min(max(n_ctrl - n_ctrl // 2 - n_unr // 2, 0), n_other)
-    ctrl_no = max(n_other - ctrl_yes, 0)
-    sizes = (n_flip - n_flip // 2, n_flip // 2, n_unr // 2, n_unr - n_unr // 2, ctrl_yes, ctrl_no)
-    return {name: q for (name, *_), q in zip(STRATA, sizes, strict=True)}
-
-
-def _shuffled_pool(candidates: list[Task], seed: int) -> list[Task]:
-    """Unique ids, targets in 2016–2025, sorted by id then shuffled with ``seed``."""
-    rng = random.Random(seed)
-    unique = {t.id: t for t in sorted(candidates, key=lambda t: t.id)}
-    pool = [t for t in unique.values() if FIRST_YEAR <= int(_period_key(t)[:4]) <= LAST_YEAR]
-    rng.shuffle(pool)
-    return pool
-
-
-def _selectable(task: Task) -> bool:
-    """Flips (non-UNRATE) and eligible controls; see :func:`_eligible_control`."""
-    if task.flips:
-        return task.series_id != CONTROL_SERIES
-    return _eligible_control(task)
-
-
-def _fill(pool: list[Task], quotas: dict[str, int], picker: _Picker, n: int) -> dict[str, int]:
-    """Fill ``quotas`` from ``pool`` into ``picker`` (round-robin, then fallbacks).
-
-    Returns the number of tasks each stratum supplied in the round-robin phase.
-    """
-    selectable = [t for t in pool if _selectable(t)]
-    spools = {name: [t for t in selectable if _stratum_name(t) == name] for name in quotas}
-    got = {name: 0 for name in quotas}
-    active = True
-    while active:  # round-robin over strata
-        active = False
-        for name, quota in quotas.items():
-            if got[name] < quota and picker.take(spools[name], 1):
-                got[name] += 1
-                active = True
-    names = list(quotas)
-    for group in _GROUPS:  # sibling fallback, keeps the group's size
-        members = [names[i] for i in group]
-        deficit = sum(quotas[m] for m in members) - sum(got[m] for m in members)
-        picker.take([t for m in members for t in spools[m]], deficit)
-    others = [t for t in pool if t.series_id != CONTROL_SERIES and _selectable(t)]
-    picker.take(others, n - len(picker.chosen))
-    return got
-
-
-class _Picker:
-    """Greedy spread-maximizing picker with shared usage counters."""
-
-    def __init__(self, avoid_overlap: bool = False) -> None:
-        self.avoid_overlap = avoid_overlap  # extend_pilot only; select_pilot unchanged
-        self.windows: dict[str, list[frozenset[date]]] = {}
-        self.chosen: list[Task] = []
-        self.ids: set[str] = set()
-        self.series: Counter[str] = Counter()
-        self.series_group: Counter[tuple[str, bool]] = Counter()
-        self.templates: Counter[str] = Counter()
-        self.years: Counter[str] = Counter()
-        self.targets: set[tuple[str, str]] = set()
-
-    def add(self, t: Task) -> None:
-        """Record ``t`` as chosen and update every usage counter."""
-        self.chosen.append(t)
-        self.ids.add(t.id)
-        self.series[t.series_id] += 1
-        self.series_group[(t.series_id, t.flips)] += 1
-        self.templates[_template_key(t)] += 1
-        self.years[_period_key(t)[:4]] += 1
-        self.targets.add((t.series_id, _period_key(t)))
-        self.windows.setdefault(t.series_id, []).append(frozenset(computation_window(t)))
-
-    def overlaps(self, t: Task) -> int:
-        """Number of chosen tasks in ``t``'s series whose window intersects ``t``'s."""
-        w = set(computation_window(t))
-        return sum(bool(w & other) for other in self.windows.get(t.series_id, ()))
-
-    def take(self, pool: list[Task], k: int) -> int:
-        """Pick up to ``k`` tasks from ``pool``; return how many were picked."""
-        taken = 0
-        for _ in range(max(k, 0)):
-            avail = [
-                (i, t)
-                for i, t in enumerate(pool)
-                if t.id not in self.ids and (t.series_id, _period_key(t)) not in self.targets
-            ]
-            if not avail:
-                break
-            _, best = min(avail, key=lambda it: (*self._score(it[1]), it[0]))
-            self.add(best)
-            taken += 1
-        return taken
-
-    def _score(self, t: Task) -> tuple[int, ...]:
-        return (
-            *((self.overlaps(t),) if self.avoid_overlap else ()),
-            self.series_group[(t.series_id, t.flips)],
-            self.series[t.series_id],
-            self.templates[_template_key(t)],
-            self.years[_period_key(t)[:4]],
-        )
-
-
-# ---------------------------------------------------------------------------
-# I/O
-# ---------------------------------------------------------------------------
-
-
-def save_tasks(path: Path, tasks: Iterable[Task]) -> None:
-    """Write tasks to ``path`` as JSON Lines, one Task per line (field order kept)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [json.dumps(dataclasses.asdict(t)) for t in tasks]
-    path.write_text("".join(line + "\n" for line in lines))
-
-
-def load_tasks(path: Path) -> list[Task]:
-    """Read tasks from a JSON Lines file written by :func:`save_tasks`."""
-    text = Path(path).read_text()
-    return [Task(**json.loads(line)) for line in text.splitlines() if line.strip()]
-
-
-# ---------------------------------------------------------------------------
-# Pilot generation entry point
-# ---------------------------------------------------------------------------
-
-SERIES = ("GDPC1", "PAYEMS", "INDPRO", "PCEPI", "UNRATE")
-REPO_ROOT: Path = Path(__file__).resolve().parents[2]
-TASKS_DIR: Path = REPO_ROOT / "tasks"
-PILOT_SEED = 0
-PILOT_N = 20
-EXTEND_N = 60  # default --n when --extend-from is given
-EXTEND_COMMAND = (
-    "python -m vintagebench.tasks --extend-from tasks/pilot.jsonl --n 60 "
-    "--out tasks/pilot60.jsonl --readme-out tasks/README60.md --seed 0"
-)
-
-
-def _yes_no(answer: Answer) -> str:
-    if isinstance(answer, bool):
-        return "Yes" if answer else "No"
-    return f"{answer:g}"
-
-
-def render_readme(candidates: list[Task], pilot: list[Task], seed: int) -> str:
-    """Markdown for tasks/README.md, generated from the candidates and the pilot."""
-    n_covid = sum(not t.flips and covid_window_overlap(t) for t in candidates)
-    trivial = Counter(_template_key(t) for t in candidates if trivial_control(t))
-    n_flips = sum(t.flips for t in pilot)
-    n_unrate = sum(t.series_id == CONTROL_SERIES for t in pilot)
-    lines = [
-        "# VintageBench tasks",
-        "",
-        "Generated by `python -m vintagebench.tasks` from data/vintages/; do not edit by",
-        "hand. Gold answers are computed programmatically from two vintages (SPEC §3).",
-        "",
-        "## Pilot",
-        "",
-        f"`tasks/pilot.jsonl`: {len(pilot)} tasks selected with `select_pilot(n={len(pilot)}, "
-        f"seed={seed})`: {n_flips} flips, {len(pilot) - n_flips} controls "
-        f"({n_unrate} {CONTROL_SERIES}).",
-        "",
-        "## Date rule",
-        "",
-        "- as_of_date: the first vintage containing the target observation (its first",
-        "  release). Targets are observations dated 2016-01 to 2025-12; targets whose",
-        "  first vintage is the pre-2016 baseline are skipped.",
-        "- revision_date: the first vintage at least one year after as_of_date, else the",
-        "  latest vintage after it.",
-        "- flips: gold_as_of != gold_revised. Each answer uses one vintage only; levels",
-        "  are never compared across vintages (base-year rebasings do not matter).",
-        "",
-        "## COVID exclusion (controls only)",
-        "",
-        "No control is selected if any observation its answer reads falls in the COVID",
-        "collapse: a month from 2020-03 to 2020-06 (monthly series); for GDPC1, any",
-        "quarter containing such a month (2020 Q1, Q2) plus the rebound quarter 2020 Q3",
-        "(so 2020 Q4, which compares with Q3, is excluded too). The window is the",
-        "target plus the template's lookback (1 month for month-over-month questions,",
-        "1 quarter for GDP, 3 months for the payroll 3-month average, 12 months for",
-        "weakest-of-12 and PCE YoY). Such controls are trivially decided by the",
-        "collapse. Flips in these windows stay eligible.",
-        f"Candidate controls excluded by this rule: {n_covid}.",
-        "",
-        "## Non-trivial controls",
-        "",
-        "Each candidate's notes record its distance from the threshold in units of the",
-        "template's materiality margin, in both vintages. A non-UNRATE control is not",
-        "selected if that distance exceeds the template's cap (column below) in BOTH",
-        "vintages: it is obvious from the era alone. UNRATE controls (the low-revision",
-        "series) and flips are exempt. Caps: 10 margins for INDPRO (0.5% MoM), PCEPI",
-        "(0.5pp) and GDPC1 growth (2pp annualized); 5 margins for GDPC1 shrink (0.25%",
-        "QoQ, about 1pp annualized); 40 margins",
-        "(40k jobs) for the PAYEMS templates.",
-        f"Candidate controls excluded by this rule: {sum(trivial.values())} "
-        "(some are also COVID-excluded).",
-        "",
-        "## Templates",
-        "",
-        "Comparisons are strict; exact ties count as No. Candidates with any needed",
-        "observation missing in either vintage are skipped. Materiality margin: a",
-        "candidate is kept only if, in BOTH vintages, the deciding quantity is clear of",
-        "its threshold by at least the margin in the column below (half the 0.1",
-        "publication unit, or stricter for GDPC1), so no gold answer hinges on a",
-        "difference below published precision. Counts are after this filter.",
-        "",
-    ]
-    lines += _template_table(candidates, trivial)
-    lines += _balance_lines(pilot)
-    lines += ["", "## Pilot tasks", ""]
-    lines += _task_table(pilot)
-    return "\n".join(lines) + "\n"
-
-
-def _template_table(candidates: list[Task], trivial: Counter[str]) -> list[str]:
-    counts: dict[tuple[str, str], list[int]] = {}
-    for t in candidates:
-        c = counts.setdefault((t.series_id, _template_key(t)), [0, 0])
-        c[0] += 1
-        c[1] += t.flips
-    tpl = {f"{s.lower()}-{tp.key}": tp for s, tps in TEMPLATES.items() for tp in tps}
-    lines = [
-        "| template | definition | materiality margin (both vintages) | control cap "
-        "(margins) | candidates | flips | trivial controls excluded |",
-        "|---|---|---|---|---|---|---|",
-    ]
-    for (series, key), (total, flips) in sorted(counts.items()):
-        tp = tpl.get(key)
-        definition, margin = (_cell(tp.definition), _cell(tp.materiality)) if tp else ("", "")
-        cap = "none" if tp is None or tp.control_cap is None else f"{tp.control_cap:g}"
-        lines.append(
-            f"| {key} ({series}) | {definition} | {margin} | {cap} | {total} | {flips} "
-            f"| {trivial[key]} |"
-        )
-    return lines
-
-
-def _task_table(
-    rows: list[Task], new_ids: set[str] | None = None, clusters: dict[str, str] | None = None
-) -> list[str]:
-    """The task table; with ``new_ids``, extra columns mark added tasks and clusters."""
-    extra = new_ids is not None
-    lines = [
-        "| id | question | as-of answer | revised answer | flips |"
-        + (" set | cluster |" if extra else ""),
-        "|---|---|---|---|---|" + ("---|---|" if extra else ""),
-    ]
-    for t in rows:
-        line = (
-            f"| {t.id} | {_cell(t.question)} | {_yes_no(t.gold_as_of)} | "
-            f"{_yes_no(t.gold_revised)} | {'yes' if t.flips else 'no'} |"
-        )
-        if new_ids is not None:
-            label = (clusters or {}).get(t.id, "")
-            line += f" {'new' if t.id in new_ids else 'pilot20'} | {label} |"
-        lines.append(line)
-    return lines
-
-
-def _cell(text: str) -> str:
-    """Escape pipes (e.g. absolute-value bars) so they do not split a table cell."""
-    return text.replace("|", "\\|")
-
-
-def _share(k: int, n: int) -> str:
-    return f"{k}/{n} ({100 * k / n:.0f}%)" if n else "0/0"
-
-
-def _balance_lines(pilot: list[Task], title: str = "Answer balance (pilot)") -> list[str]:
-    n = len(pilot)
-    yes_as_of = sum(bool(t.gold_as_of) for t in pilot)
-    yes_rev = sum(bool(t.gold_revised) for t in pilot)
-
-    def cell(flips: bool, yes: bool) -> int:
-        return sum(t.flips == flips and bool(t.gold_as_of) == yes for t in pilot)
-
-    return [
-        "",
-        f"## {title}",
-        "",
-        "| | as-of Yes | as-of No |",
-        "|---|---|---|",
-        f"| flips | {cell(True, True)} | {cell(True, False)} |",
-        f"| controls | {cell(False, True)} | {cell(False, False)} |",
-        "",
-        f"- Share of Yes: as-of {_share(yes_as_of, n)}; revised {_share(yes_rev, n)}.",
-        f"- Majority-class baseline (always answer the more common gold): as-of "
-        f"{_share(max(yes_as_of, n - yes_as_of), n)}, revised "
-        f"{_share(max(yes_rev, n - yes_rev), n)}.",
-    ]
-
-
-def eligible_pool_counts(candidates: list[Task]) -> dict[str, tuple[int, int, int, int]]:
-    """Per template key: selectable (flips, controls, flips with gap, controls with gap).
-
-    Selectable = what :func:`select_pilot` may draw from: targets in 2016–2025,
-    non-UNRATE flips, controls passing the COVID exclusion and the non-trivial cap
-    (materiality is already applied by build_candidates). "With gap" adds the
-    :func:`revision_gap_ok` rule that :func:`extend_pilot` applies to new tasks.
-    One task per (series, period) and overlap avoidance act at pick time and are
-    not netted here.
-    """
-    out: dict[str, list[int]] = {}
-    for t in _shuffled_pool(candidates, 0):
-        row = out.setdefault(_template_key(t), [0, 0, 0, 0])
-        if _selectable(t):
-            k = 0 if t.flips else 1
-            row[k] += 1
-            row[k + 2] += revision_gap_ok(t)
-    return {k: (v[0], v[1], v[2], v[3]) for k, v in sorted(out.items())}
-
-
-def _exhausted_flip_templates(candidates: list[Task], chosen: list[Task]) -> list[str]:
-    """Templates with eligible flips, none of which is left for an extension."""
-    ids = {t.id for t in chosen}
-    pool = [t for t in _shuffled_pool(candidates, 0) if t.flips and _selectable(t)]
-    keys = sorted({_template_key(t) for t in pool})
-    return [
-        k
-        for k in keys
-        if not any(_template_key(t) == k and t.id not in ids and revision_gap_ok(t) for t in pool)
-    ]
-
-
-EASY_CAP_FACTOR, EASY_MARGINS = 2.0, 20.0  # README60 disclosure of easy-side controls
-
-
-def easy_side_controls(
-    rows: list[Task], root: Path | None = None
-) -> list[tuple[Task, float, float, float]]:
-    """Non-UNRATE controls whose AS-OF distance is > 2x the cap or > 20 margins.
-
-    The cap excludes a control only if min(as-of, revised) exceeds it, so a
-    control can be far from the line in one vintage. Returns (task, as-of
-    distance, revised distance, cap) for each, in input order.
-    """
+def load_tasks(path: Path | str, root: Path | str = data.RAW_DIR) -> list[Task]:
+    """Read task definitions and recompute golds, flips and margins from the vintages
+    in ``root`` (as of as_of_date and revision_date). Raises TaskKindError on mismatch."""
+    rows = [json.loads(x) for x in Path(path).read_text().splitlines() if x.strip()]
+    vint: dict[str, Vintages] = {}
     out = []
-    for t in rows:
-        tp = template_for(t)
-        if t.flips or t.series_id == CONTROL_SERIES or tp is None or tp.control_cap is None:
-            continue
-        a, r = threshold_distances(t, root)
-        if a > EASY_CAP_FACTOR * tp.control_cap or a > EASY_MARGINS:
-            out.append((t, a, r, tp.control_cap))
+    for row in rows:
+        defn = {k: row[k] for k in DEFINITION_FIELDS if k in row}
+        task = Task(**defn)
+        if task.series_id not in vint:
+            vint[task.series_id] = Vintages(task.series_id, root)
+        v = vint[task.series_id]
+        out.append(evaluate(task, v.as_of(_d(task.as_of_date)), v.as_of(_d(task.revision_date))))
     return out
 
 
-def _display_path(path: Path) -> str:
-    path = Path(path).resolve()
-    return str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else path.name
+# --- base rates -------------------------------------------------------------------------
+
+VARIANTS = ("all", "all_no_covid", "material", "material_no_covid")
+COMPARISONS = ("latest", "one_year")
 
 
-def render_extended_readme(
-    candidates: list[Task],
-    tasks_out: list[Task],
-    existing: list[Task],
-    seed: int,
-    out_path: Path,
-    base_path: Path,
-    root: Path | None = None,
-) -> str:
-    """Markdown for an extended set (e.g. tasks/README60.md).
+@dataclass(frozen=True)
+class RateRow:
+    group: str  # "overall" | "series" | "template"
+    name: str
+    comparison: str  # "latest" | "one_year"
+    variant: str
+    k: int
+    n: int
 
-    Same tables as :func:`render_readme` (per-template counts, answer balance, all
-    tasks) plus the eligible pool, the strata cells and the series/year spread.
+
+def _differs(c: Candidate, comparison: str, variant: str) -> bool | None:
+    """None if the instance is not in the population of this cell, else whether the
+    first-release conclusion differs from the comparison vintage's."""
+    if c.year_later is None or not c.gap_ok:
+        return None
+    gold, dist = (
+        (c.gold_latest, c.dist_latest) if comparison == "latest" else (c.gold_year, c.dist_year)
+    )
+    if gold is None or dist is None:
+        return None
+    if variant.endswith("no_covid") and c.covid:
+        return None
+    if variant.startswith("material") and not (c.material(c.dist_first) and c.material(dist)):
+        return None
+    return gold != c.gold_first
+
+
+def _template_name(c: Candidate) -> str:
+    tp = c.tp
+    return tp.key if len(tp.thresholds) == 1 else f"{tp.key} > {c.threshold:g}"
+
+
+def base_rates(
+    candidates: list[Candidate] | None = None, root: Path | str = data.RAW_DIR
+) -> list[RateRow]:
+    """How often the first-release conclusion differs from (i) the pinned latest
+    vintage and (ii) the first vintage >= 365 days after first release.
+
+    Population: every candidate instance (from :func:`build_candidates`; built from
+    ``root`` if None) with a vintage >= 365 days after its first release, so (i) and
+    (ii) share a population. Variants: all; COVID windows excluded; material (|distance|
+    >= margin in both compared vintages); material and COVID excluded.
     """
-    n = len(tasks_out)
-    new_ids = {t.id for t in tasks_out} - {t.id for t in existing}
-    out_name, base_name = _display_path(out_path), _display_path(base_path)
-    trivial = Counter(_template_key(t) for t in candidates if trivial_control(t))
-    n_flips = sum(t.flips for t in tasks_out)
-    n_unrate = sum(t.series_id == CONTROL_SERIES for t in tasks_out)
-    clusters = task_clusters(tasks_out)
-    new_flips = [t for t in tasks_out if t.id in new_ids and t.flips]
+    cands = build_candidates(data.SERIES_IDS, root) if candidates is None else candidates
+    groups: list[tuple[str, Callable[[Candidate], str]]] = [
+        ("overall", lambda c: "all"),
+        ("series", lambda c: c.series_id),
+        ("template", _template_name),
+    ]
+    rows: list[RateRow] = []
+    for group, key in groups:
+        names = sorted({key(c) for c in cands}, key=lambda n: (n != "all", n))
+        for name in names:
+            members = [c for c in cands if key(c) == name]
+            for comp in COMPARISONS:
+                for var in VARIANTS:
+                    vals = [d for c in members if (d := _differs(c, comp, var)) is not None]
+                    rows.append(RateRow(group, name, comp, var, sum(vals), len(vals)))
+    return rows
+
+
+def _cell(k: int, n: int) -> str:
+    return f"{k}/{n} ({100 * k / n:.1f}%)" if n else "0/0 (n/a)"
+
+
+VARIANT_LABELS = {
+    "all": "all instances",
+    "all_no_covid": "all, COVID windows excluded",
+    "material": "material in both vintages",
+    "material_no_covid": "material, COVID excluded",
+}
+
+
+def render_base_rates(rows: list[RateRow]) -> str:
+    head = [
+        "# Base rates: how often a first-release conclusion changes",
+        "",
+        "Generated by `python -m vintagebench.tasks --base-rates` (or `--build`) from the",
+        "local RTDSM vintages. Counts only; no data values (SPEC §2.3).",
+        "",
+        "Population: every (series, template, period, threshold) instance of the task",
+        "templates (tasks/README.md) whose period is in 2016-2025, first released after",
+        "the baseline vintage, computable at first release, and with a vintage at least",
+        "365 days after its first release (so both comparisons use the same instances).",
+        "No selection filters apply. Each cell is k/n (share): k instances whose Yes/No",
+        "conclusion at first release differs from the comparison vintage, out of n.",
+        "",
+        "- vs latest: the pinned latest vintage (data/manifest.json).",
+        "- vs one year later: the first vintage at least 365 days after first release.",
+        "- material: the deciding quantity clears its threshold by at least the template",
+        "  margin (half a publication unit) in both compared vintages.",
+        "- COVID excluded: no observation of the computation window in 2020-02..2021-03",
+        "  (2020 Q1..2021 Q1 for GDP).",
+        "",
+    ]
+    out = head
+    for comp, title in (("latest", "vs latest vintage"), ("one_year", "vs one year later")):
+        out += [f"## First release {title}", ""]
+        out.append("| group | " + " | ".join(VARIANT_LABELS[v] for v in VARIANTS) + " |")
+        out.append("|---|" + "---|" * len(VARIANTS))
+        keys = sorted(
+            {(r.group, r.name) for r in rows if r.comparison == comp},
+            key=lambda g: (("overall", "series", "template").index(g[0]), g[1]),
+        )
+        for group, name in keys:
+            cells = {
+                r.variant: r
+                for r in rows
+                if r.comparison == comp and r.group == group and r.name == name
+            }
+            label = "overall" if group == "overall" else f"{group}: {name}"
+            out.append(
+                f"| {label} | " + " | ".join(_cell(cells[v].k, cells[v].n) for v in VARIANTS) + " |"
+            )
+        out.append("")
+    return "\n".join(out)
+
+
+# --- README -----------------------------------------------------------------------------
+
+
+def _yn(x: bool | None) -> str:
+    return "n/a" if x is None else ("Yes" if x else "No")
+
+
+def _example(tp: Template) -> str:
+    p = date(2019, 4, 1) if tp.quarterly else date(2019, 5, 1)
+    return tp.question(p, tp.thresholds[-1])
+
+
+def render_readme(sel: Selection, counts: dict[str, dict[str, int]], seed: int) -> str:
+    tasks = sel.tasks
+    clusters = task_clusters(tasks)
     lines = [
-        f"# VintageBench tasks: {n}-task set",
+        "# VintageBench v1 tasks",
         "",
-        "Generated from data/vintages/; do not edit by hand. Gold answers are computed",
-        "programmatically from two vintages (SPEC §3). Regenerate with:",
+        "`v1.jsonl` stores task definitions only (id, series_id, template, period,",
+        "threshold, as_of_date, revision_date, question, answer_type, kind, notes). Gold",
+        "answers, flips and threshold distances are recomputed from the local RTDSM",
+        "vintages by `vintagebench.tasks.load_tasks`, which fails if a task's computed",
+        "kind disagrees with its stored kind. No data values are stored or quoted here",
+        "(SPEC §2.3). Regenerate with `python -m vintagebench.tasks --build`",
+        f"(seed {seed}).",
         "",
-        "```",
-        EXTEND_COMMAND
-        if (n, seed) == (EXTEND_N, PILOT_SEED)
-        else (
-            f"python -m vintagebench.tasks --extend-from {base_name} --n {n} "
-            f"--out {out_name} --readme-out <readme> --seed {seed}"
-        ),
-        "```",
+        "## Conventions used to compute gold answers",
+        "",
+        "Questions state the question in plain words and intentionally do not spell out",
+        "the formula; the gold answer uses these conventions (SPEC §3). All quantities are",
+        "computed within one vintage, unrounded unless stated; ties count as No.",
+        "",
+        "| template | series | example question | thresholds | gold (deciding quantity) "
+        "| materiality margin | control cap | key observations |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for tp in TEMPLATE_LIST:
+        thr = ", ".join(f"{x:g}" for x in tp.thresholds)
+        unit = "pp" if tp.series_id != "EMPLOY" else "thousand"
+        offs = ", ".join(("t" if k == 0 else f"t{k:+d}") for k in (min(tp.offsets), 0))
+        offs = f"{offs} ({len(tp.offsets)} obs)" if len(tp.offsets) > 2 else offs
+        if tp.quarterly:
+            offs = "q-1, q"
+        lines.append(
+            f"| {tp.key} | {tp.series_id} | {_example(tp)} | {thr} | {tp.quantity_doc} "
+            f"| {tp.margin_doc} | {tp.cap:g} {unit} | {offs} |"
+        )
+    lines += [
+        "",
+        "Notes: GDP growth is the annualized quarter-over-quarter change of the real GDP",
+        "level; payroll changes are level differences in thousands; IP 'fell' is a",
+        "month-over-month level decline; CPI inflation uses the seasonally adjusted CPI",
+        "index in RTDSM (BLS's headline 12-month figure uses the unadjusted index);",
+        "'unemployment rose' compares the published rates (0.1 pp precision).",
+        "",
+        "## Date rules and filters",
+        "",
+        "- as_of_date: the first RTDSM vintage containing the period (first release);",
+        "  periods 2016-2025, first released after the baseline vintage.",
+        "- flip / control: revision_date = pinned latest vintage, >= 365 days after",
+        "  as_of_date. flip: Yes/No differs; control: same answer, and |distance| <= the",
+        "  control cap in both vintages (tighter than v0's 10 margins / 40k).",
+        "- no_change: revision_date = last vintage of the unbroken run after the as-of",
+        "  vintage in which every computation-window observation is identical (>= 1",
+        "  vintage later; >= 90 days preferred); within the control cap.",
+        "- Materiality (all kinds): |distance| >= margin in both vintages.",
+        "- COVID exclusion (all kinds): computation window touching 2020-02..2021-03",
+        "  (2020 Q1..2021 Q1 for GDP).",
+        "",
+        "Candidate counts per filter stage (instances = every series/template/period/",
+        "threshold computable at first release):",
+        "",
+        "| series | instances | gap >= 365d | material | material, no COVID | flip "
+        "| control (uncapped) | control (capped) | no-change identical | no_change |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for sid in [*sorted(k for k in counts if k != "all"), "all"]:
+        r = counts[sid]
+        lines.append(
+            f"| {sid} | {r['instances']} | {r['gap_ok']} | {r['material']} "
+            f"| {r['material_no_covid']} | {r['flip']} | {r['control_uncapped']} "
+            f"| {r['control']} | {r['no_change_identical']} | {r['no_change']} |"
+        )
+    lines += [
         "",
         "## Selection",
         "",
-        f"`{out_name}`: {n} tasks = the {len(existing)} tasks of `{base_name}`, kept",
-        f"unchanged, plus {len(new_ids)} new ones from `extend_pilot(existing, candidates, "
-        f"n_total={n}, seed={seed})`: {n_flips} flips, {n - n_flips} controls "
-        f"({n_unrate} {CONTROL_SERIES}).",
+        "`select_v1(candidates, seed=0)`: 20 flips, 20 controls, 5 no_change; as-of",
+        "answers balanced Yes/No within each kind (10/10, 10/10, 3/2). Greedy and seeded:",
+        "each slot takes the eligible candidate that overlaps the fewest already-selected",
+        "same-series computation windows, then spreads series, each series' Yes/No",
+        "answers, years and templates, then the seeded rank. Overlap is allowed only",
+        "when a slot cannot otherwise be filled.",
         "",
-        "The new tasks obey the same rules as the pilot (see tasks/README.md: date rule,",
-        "materiality margins in both vintages, COVID exclusion and non-trivial caps for",
-        "controls, no UNRATE flips, targets 2016-01 to 2025-12, one task per (series,",
-        "target period), no duplicate ids) and the same stratified, spread-maximizing",
-        "picker, whose usage counters start from the existing tasks. Quotas are those",
-        f"of a balanced {n}-task set, minus what the existing tasks already fill.",
+        f"Unfilled slots: {sum(sel.shortfall.values())} "
+        f"({', '.join(f'{k} {v}' for k, v in sel.shortfall.items())}). "
+        f"Overlapping same-series pairs: {sel.overlaps}; clusters: "
+        f"{len(set(clusters.values()))} for {len(tasks)} tasks.",
         "",
-        "Two extra rules apply to the new tasks only (the base tasks are unchanged):",
-        "",
-        f"- Revision gap: revision_date - as_of_date >= {MIN_REVISION_GAP_DAYS} days. This",
-        '  excludes the date rule\'s "else the latest vintage" fallback, whose revised',
-        "  answer could change when newer vintages are fetched.",
-        "- Independence: a task's computation window is its target period plus the",
-        "  template's lookback; window length (target included): 2 months for",
-        "  month-over-month, 2 quarters for GDP, 4 months for the payroll 3-month",
-        "  average, 13 months for weakest-of-12 and PCE YoY. Two tasks in the same",
-        "  series overlap if their windows intersect. The picker's first criterion is",
-        "  the number of already chosen tasks a candidate overlaps, so an overlapping",
-        "  task is added only when no non-overlapping candidate is left in the stratum",
-        "  (or its fallback) being filled.",
-        "",
-        f"Row order: the {len(existing)} tasks of `{base_name}` first, in their original",
-        f"order, then the {len(new_ids)} new tasks sorted by id. The first {len(existing)} rows",
-        f"of `{out_name}` are therefore exactly the base set (e.g. `--limit {len(existing)}`).",
-        "",
-        "## Templates",
-        "",
-        "Counts are candidates after the materiality filter (as in tasks/README.md).",
-        "",
+        "| kind | series | as-of Yes | as-of No |",
+        "|---|---|---|---|",
     ]
-    lines += _template_table(candidates, trivial)
+    tally = Counter((t.kind, t.series_id, bool(t.gold_as_of)) for t in tasks)
+    for kind in KINDS:
+        for sid in sorted({t.series_id for t in tasks}):
+            y, n = tally[(kind, sid, True)], tally[(kind, sid, False)]
+            if y or n:
+                lines.append(f"| {kind} | {sid} | {y} | {n} |")
+    years = Counter(_d(t.period).year for t in tasks)
     lines += [
         "",
-        "## Eligible pool",
+        "Tasks per period year: " + ", ".join(f"{y}: {years[y]}" for y in sorted(years)) + ".",
         "",
-        "Candidates the selection may draw from, after every rule (COVID exclusion and",
-        "non-trivial cap for controls; UNRATE flips are never drawn). One task per",
-        "(series, target period) is enforced at pick time and is not netted here.",
-        "",
-        'Columns "with gap" also apply the 365-day revision gap required of new tasks.',
-        "",
-        "| template | eligible flips | eligible controls | flips with gap | controls with gap "
-        "| flips in this set | controls in this set |",
-        "|---|---|---|---|---|---|---|",
     ]
-    used = Counter((_template_key(t), t.flips) for t in tasks_out)
-    for key, (f, c, fg, cg) in eligible_pool_counts(candidates).items():
+    lines += [
+        "## Tasks",
+        "",
+        "| id | question | kind | as-of answer | revised answer | cluster |",
+        "|---|---|---|---|---|---|",
+    ]
+    for t in tasks:
         lines.append(
-            f"| {key} | {f} | {c} | {fg} | {cg} | {used[(key, True)]} | {used[(key, False)]} |"
+            f"| {t.id} | {t.question} | {t.kind} | {_yn(t.gold_as_of)} "
+            f"| {_yn(t.gold_revised)} | {clusters[t.id]} |"
         )
-    lines += _balance_lines(tasks_out, title=f"Answer balance ({n}-task set)")
-    cells = Counter(_stratum_name(t) for t in tasks_out)
-    lines += [
-        "",
-        "Strata (actual / target):",
-        "",
-        "| stratum | tasks | target |",
-        "|---|---|---|",
-    ]
-    targets = _strata_quotas(n, default_n_unrate(n))
-    for name, *_ in STRATA:
-        lines.append(f"| {name} | {cells[name]} | {targets[name]} |")
-    lines += ["", "## Spread", "", "| series | flips | controls | total |", "|---|---|---|---|"]
-    for sid in sorted({t.series_id for t in tasks_out}):
-        rows = [t for t in tasks_out if t.series_id == sid]
-        k = sum(t.flips for t in rows)
-        lines.append(f"| {sid} | {k} | {len(rows) - k} | {len(rows)} |")
-    years = Counter(_period_key(t)[:4] for t in tasks_out)
-    lines += ["", "| year | tasks |", "|---|---|"]
-    lines += [f"| {y} | {years[y]} |" for y in sorted(years)]
-    exhausted = _exhausted_flip_templates(candidates, tasks_out)
-    by_series = Counter(t.series_id for t in new_flips)
-    top2 = by_series.most_common(2)
-    late = sum(_period_key(t)[:4] in ("2024", "2025") for t in new_flips)
-    lines += [
-        "",
-        "The year and series spread is limited by the eligible flip pool, which is",
-        f"exhausted for {', '.join(exhausted) or 'no template'}, so most new flips are "
-        + " and ".join(f"{s} ({k})" for s, k in top2)
-        + f" (of {len(new_flips)} new flips) and {late} of them target 2024–2025.",
-    ]
-    lines += _cluster_lines(tasks_out, clusters)
-    lines += _easy_control_lines(tasks_out, root)
-    lines += ["", f"## Tasks ({n})", ""]
-    lines += _task_table(tasks_out, new_ids, clusters)
     return "\n".join(lines) + "\n"
 
 
-def _cluster_lines(rows: list[Task], clusters: dict[str, str]) -> list[str]:
-    groups: dict[str, list[Task]] = {}
-    for t in rows:
-        groups.setdefault(clusters[t.id], []).append(t)
-    n_flip = len({clusters[t.id] for t in rows if t.flips})
-    n_ctrl = len({clusters[t.id] for t in rows if not t.flips})
-    multi = sorted((k, v) for k, v in groups.items() if len(v) > 1)
-    mixed = [k for k, v in multi if len({t.flips for t in v}) == 2]
-    lines = [
-        "",
-        "## Clusters",
-        "",
-        "A cluster is a connected component of the overlap graph within one series",
-        "(`task_clusters`); a task overlapping no other is its own cluster. Labels are",
-        "`<SERIES>:<first month>..<last month>` of the union of the members' windows.",
-        "Use clusters, not tasks, as the independent unit when aggregating results.",
-        "",
-        f"- Distinct clusters: {n_flip} among the {sum(t.flips for t in rows)} flips, "
-        f"{n_ctrl} among the {sum(not t.flips for t in rows)} controls "
-        f"({len(groups)} in all). {len(mixed)} cluster(s) contain both a flip and a "
-        f"control ({', '.join(mixed) or 'none'}), which is why {n_flip} + {n_ctrl} "
-        f"{'=' if n_flip + n_ctrl == len(groups) else '≠'} {len(groups)}.",
-        f"- Multi-task clusters ({len(multi)}):",
-        "",
-        "| cluster | tasks | members (flips marked *) |",
-        "|---|---|---|",
-    ]
-    for label, members in multi:
-        names = ", ".join(t.id + ("*" if t.flips else "") for t in sorted(members, key=_by_id))
-        lines.append(f"| {label} | {len(members)} | {names} |")
-    return lines
-
-
-def _by_id(t: Task) -> str:
-    return t.id
-
-
-def _easy_control_lines(rows: list[Task], root: Path | None) -> list[str]:
-    easy = easy_side_controls(rows, root)
-    lines = [
-        "",
-        "## Controls easy on one side",
-        "",
-        "The non-trivial cap excludes a control only if min(as-of, revised) distance",
-        "exceeds the cap, so a kept control can still be far from the threshold as of",
-        f"its first release. Controls whose as-of distance is more than {EASY_CAP_FACTOR:g}x",
-        f"the cap or more than {EASY_MARGINS:g} margins ({len(easy)}):",
-        "",
-        "| id | as-of distance (margins) | revised distance (margins) | cap |",
-        "|---|---|---|---|",
-    ]
-    lines += [f"| {t.id} | {a:.1f} | {r:.1f} | {c:g} |" for t, a, r, c in easy]
-    return lines
+# --- CLI --------------------------------------------------------------------------------
 
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="python -m vintagebench.tasks",
-        description=(
-            "Build candidates from data/vintages/ and write a task set plus its README. "
-            "With no options, regenerates tasks/pilot.jsonl and tasks/README.md "
-            f"(select_pilot, n={PILOT_N}, seed={PILOT_SEED})."
-        ),
-        epilog=f"Regenerate the 60-task set: {EXTEND_COMMAND}",
+        prog="python -m vintagebench.tasks", description=__doc__.split("\n")[0]
     )
-    p.add_argument(
-        "--n",
-        type=int,
-        default=None,
-        help=f"number of tasks (default {PILOT_N}; {EXTEND_N} with --extend-from)",
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument(
+        "--build",
+        action="store_true",
+        help="write tasks/v1.jsonl, tasks/README.md and tasks/BASE_RATES.md",
     )
-    p.add_argument(
-        "--out",
-        type=Path,
-        default=None,
-        help="output JSONL (default tasks/pilot.jsonl; tasks/pilot<N>.jsonl with --extend-from)",
-    )
-    p.add_argument(
-        "--readme-out",
-        type=Path,
-        default=None,
-        help="output README (default tasks/README.md; tasks/README<N>.md with --extend-from)",
-    )
-    p.add_argument(
-        "--extend-from",
-        type=Path,
-        default=None,
-        help="existing task JSONL to keep and top up to --n tasks (extend_pilot)",
-    )
-    p.add_argument("--seed", type=int, default=PILOT_SEED, help=f"seed (default {PILOT_SEED})")
+    g.add_argument("--base-rates", action="store_true", help="write tasks/BASE_RATES.md")
+    p.add_argument("--root", type=Path, default=data.RAW_DIR, help="RTDSM data directory")
+    p.add_argument("--out-dir", type=Path, default=TASKS_DIR)
+    p.add_argument("--seed", type=int, default=SEED)
     return p
 
 
-def main(argv: list[str] | None = None, *, root: Path = data.DATA_DIR) -> None:
-    """CLI: regenerate a task set and its README from the vintage data under ``root``.
-
-    Default (no options): tasks/pilot.jsonl and tasks/README.md via select_pilot.
-    ``--extend-from PATH``: keep the tasks in PATH and top up to ``--n`` with
-    :func:`extend_pilot`. ``--help`` prints help and exits before any work.
-    """
-    parser = _parser()
-    args = parser.parse_args(argv)
-    extend = args.extend_from is not None
-    n = args.n if args.n is not None else (EXTEND_N if extend else PILOT_N)
-    out = args.out or TASKS_DIR / (f"pilot{n}.jsonl" if extend else "pilot.jsonl")
-    readme = args.readme_out or TASKS_DIR / (f"README{n}.md" if extend else "README.md")
-    if extend and Path(out).resolve() == Path(args.extend_from).resolve():
-        parser.error("--out must differ from --extend-from (the base set is kept unchanged)")
-    candidates = build_candidates(SERIES, root)
-    if extend:
-        existing = load_tasks(args.extend_from)
-        _check_existing(existing, candidates)
-        chosen = extend_pilot(existing, candidates, n_total=n, seed=args.seed)
-        text = render_extended_readme(
-            candidates, chosen, existing, args.seed, Path(out), Path(args.extend_from), root
-        )
-    else:
-        chosen = select_pilot(candidates, n=n, seed=args.seed)
-        text = render_readme(candidates, chosen, args.seed)
-    save_tasks(Path(out), chosen)
-    Path(readme).parent.mkdir(parents=True, exist_ok=True)
-    Path(readme).write_text(text)
-    print(f"{len(candidates)} candidates; wrote {len(chosen)} tasks to {out} and {readme}")
-
-
-def _check_existing(existing: list[Task], candidates: list[Task]) -> None:
-    """Warn if an existing task is not reproduced by the current candidates."""
-    by_id = {t.id: t for t in candidates}
-    stale = [t.id for t in existing if by_id.get(t.id) != t]
-    if stale:
-        warnings.warn(
-            f"extend: {len(stale)} existing task(s) not reproduced by the current "
-            f"candidates (kept unchanged): {', '.join(stale)}",
-            stacklevel=2,
-        )
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    cands = build_candidates(data.SERIES_IDS, args.root)
+    out: Path = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "BASE_RATES.md").write_text(render_base_rates(base_rates(cands, args.root)))
+    if args.build:
+        sel = select_v1_detailed(cands, args.seed)
+        save_tasks(out / "v1.jsonl", sel.tasks)
+        loaded = load_tasks(out / "v1.jsonl", args.root)  # round-trip check
+        sel = Selection(loaded, sel.shortfall, sel.overlaps)
+        (out / "README.md").write_text(render_readme(sel, filter_counts(cands), args.seed))
+        print(f"wrote {len(loaded)} tasks; shortfall {sel.shortfall}; overlaps {sel.overlaps}")
+    print(f"wrote {out / 'BASE_RATES.md'}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
