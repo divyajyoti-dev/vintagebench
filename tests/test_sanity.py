@@ -100,3 +100,15 @@ def test_check_expectations_passes_and_catches_a_broken_agent():
         for p in probes(sanity.latest_recaller).values()
     ]
     assert sanity.check_expectations([], swapped, TASKS, ROOT)
+
+
+def test_rate_probe_recallers(monkeypatch):
+    from vintagebench import episode
+
+    rate = episode.ProbeRate("mom_pct", "the month-over-month percent change of TOY", False)
+    monkeypatch.setitem(episode.PROBE_RATES, "TOY", rate)
+    first = probes(sanity.first_release_recaller)
+    latest = probes(sanity.latest_recaller)
+    assert first[FLIP.id].task_class == "first_release" and latest[FLIP.id].task_class == "latest"
+    assert first[CONTROL.id].task_class == "indistinguishable"
+    assert sanity.check_expectations([], [*first.values(), *latest.values()], TASKS, ROOT) == []

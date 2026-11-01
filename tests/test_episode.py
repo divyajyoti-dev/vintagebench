@@ -3,6 +3,7 @@ OpenAI client. No network."""
 
 import json
 from dataclasses import asdict
+from datetime import date
 
 import pytest
 from harness_fakes import FLIP, TASKS, V1, V2, install
@@ -309,3 +310,51 @@ def test_real_series_metadata_and_rounding(monkeypatch):
         assert "vintage" not in text.lower() and "revis" not in text.lower()
         assert grader.rounding_unit(sid) > 0
     assert episode.describe_series("EMPLOY").startswith("US nonfarm payroll employment")
+
+
+# --- growth-rate probe (ROUTPUT / IPT) and memoized lookups -------------------------
+
+
+@pytest.fixture
+def toy_rate(monkeypatch):
+    rate = episode.ProbeRate("mom_pct", "the month-over-month percent change of TOY", False)
+    monkeypatch.setitem(episode.PROBE_RATES, "TOY", rate)
+    return rate
+
+
+def test_rate_probe_prompt_and_target(toy_rate):
+    assert episode.probe_target(FLIP) == ("mom_pct", ["2020-06-01"])
+    (system, user) = episode.probe_messages(FLIP)
+    assert "the month-over-month percent change of TOY in June 2020?" in user["content"]
+    assert '{"values": {"2020-06-01": <percent or null>}}' in user["content"]
+    assert "Today is" not in system["content"] + user["content"]
+    rec = episode.run_probe(FLIP, Scripted(text('{"values": {"2020-06-01": -0.3}}')), ROOT)
+    assert rec.quantity == "mom_pct" and rec.dates == ["2020-06-01"]
+
+
+def test_real_probe_rates_use_gold_conventions():
+    assert set(episode.PROBE_RATES) == {"ROUTPUT", "IPT"}
+    gdp, ip = episode.PROBE_RATES["ROUTPUT"], episode.PROBE_RATES["IPT"]
+    q3, q4 = date(2018, 7, 1), date(2018, 10, 1)
+    assert gdp.compute({q3: 100.0, q4: 101.0}, q4) == pytest.approx(100 * (1.01**4 - 1))
+    m5, m6 = date(2020, 5, 1), date(2020, 6, 1)
+    assert ip.compute({m5: 100.0, m6: 99.5}, m6) == pytest.approx(-0.5)
+    assert "annualized quarter-over-quarter percent change of US real GDP" in gdp.phrase
+
+
+def test_memo_is_keyed_by_function_and_args(monkeypatch):
+    calls = []
+
+    def fake(series_id, as_of, root):
+        calls.append((series_id, as_of))
+        return len(calls)
+
+    episode.clear_memo()
+    monkeypatch.setattr(episode.data, "get_as_of", fake)
+    assert episode.as_of_series("TOY", "2021-01-15", "r") == 1
+    assert episode.as_of_series("TOY", date(2021, 1, 15), "r") == 1  # same key
+    assert episode.as_of_series("TOY", "2021-02-15", "r") == 2
+    assert episode.as_of_series("TOY", "2021-01-15", "other-root") == 3
+    monkeypatch.setattr(episode.data, "get_as_of", lambda *a: "new")
+    assert episode.as_of_series("TOY", "2021-01-15", "r") == "new"  # new function: no stale hit
+    assert len(calls) == 3

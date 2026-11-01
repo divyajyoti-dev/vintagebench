@@ -13,8 +13,10 @@ sentence is sent and the model must use the tool, which stays available and serv
 revision_date data. Reply keys: calculation, answer, confidence, changed, values_used,
 reason.
 
-Memorization probe: one call, no tools, no as-of date in the prompt, asking for the
-values of the task's key observations (tasks.key_observations) from memory.
+Memorization probe: one call, no tools, no as-of date in the prompt, asking from memory
+for the values of the task's key observations (tasks.key_observations; EMPLOY, RUC,
+PCPI), or for ROUTPUT / IPT the deciding growth rate of the task's period (PROBE_RATES),
+because their base year changes across vintages so levels are not comparable.
 
 Models and sanity agents run through the same loop. Replies are parsed leniently
 (bare JSON, fenced blocks, JSON inside prose); a reply that cannot be parsed is
@@ -100,6 +102,11 @@ reply with ONLY a JSON object with exactly these keys, filled in this order:
 ANSWER_FORMATS = {"yes_no": '"yes" or "no"', "number": "<a single number>"}
 TURN2_MESSAGE = "Today is {revision_date}. Here is the latest data. Answer the question."
 
+PROBE_RATE_USER = """From memory, what was {phrase} in {label}? Give your best \
+recollection as a percent (e.g. 1.5 for 1.5%); use null if you do not know it. Reply with \
+ONLY a JSON object:
+{{"values": {{"{key}": <percent or null>}}}}"""
+
 PROBE_SYSTEM = "You are an economic data analyst. No tools or data files are available."
 PROBE_USER = """From memory, what are the values of {description} for these observation \
 dates? Dates are the first day of the observation {period}.
@@ -138,12 +145,15 @@ class ProbeRecord:
     """One memorization-probe call: requested dates and the parsed reply.
 
     ``reply`` is ``{"values": {...}}`` or ``{"_error": str, "_raw": str}``.
+    ``quantity`` is "level" (values of the key observations) or a PROBE_RATES
+    quantity (one growth rate, keyed by the task's period).
     """
 
     task_id: str
     agent: str
     dates: list[str]
     reply: dict[str, Any]
+    quantity: str = "level"
     transcript: list[dict[str, Any]] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
@@ -163,6 +173,58 @@ def iso(d: Any) -> str:
 
 def day(d: Any) -> date:
     return pd.Timestamp(d).date()
+
+
+# --- memoized data lookups -----------------------------------------------------------
+# Vintages are immutable during a process, so lookups are memoized. The key includes
+# the data.py function object itself (tests that monkeypatch data never see stale
+# entries), the series, the root (as str) and the date. Results are shared: callers
+# must not mutate the returned Series/DataFrames. clear_memo() resets.
+
+_MEMO: dict[tuple[Any, ...], Any] = {}
+MEMO_MAX = 100_000
+
+
+def memo(fn: Any, *args: Any) -> Any:
+    key = (fn, *args)
+    try:
+        return _MEMO[key]
+    except KeyError:
+        pass
+    if len(_MEMO) >= MEMO_MAX:
+        _MEMO.clear()
+    _MEMO[key] = out = fn(*args)
+    return out
+
+
+def clear_memo() -> None:
+    _MEMO.clear()
+
+
+def as_of_series(series_id: str, as_of: Any, root: Any) -> pd.Series:
+    """data.get_as_of, memoized."""
+    return memo(data.get_as_of, series_id, day(as_of), str(root))
+
+
+def vintages(series_id: str, root: Any) -> pd.DataFrame:
+    """data.load_vintages, memoized."""
+    return memo(data.load_vintages, series_id, str(root))
+
+
+def first_release(series_id: str, obs: Any, root: Any) -> tuple[float, date]:
+    """data.first_release, memoized."""
+    return memo(data.first_release, series_id, day(obs), str(root))
+
+
+def latest_value(series_id: str, obs: Any, root: Any) -> float:
+    """data.latest_value, memoized."""
+    return memo(data.latest_value, series_id, day(obs), str(root))
+
+
+def latest_series(series_id: str, root: Any) -> pd.Series:
+    """The full latest pinned vintage of a series."""
+    df = vintages(series_id, root)
+    return as_of_series(series_id, max(df["vintage_date"].map(day)), root)
 
 
 # --- series metadata (data.SERIES) ---------------------------------------------------
@@ -211,6 +273,50 @@ def _period_word(series_id: str) -> str:
     return "quarter" if freq.startswith("q") else "month"
 
 
+# --- probe targets -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProbeRate:
+    """A growth rate probed instead of levels (base years differ across vintages)."""
+
+    quantity: str
+    phrase: str
+    quarterly: bool
+
+    def compute(self, snapshot: Any, period: date) -> float | None:
+        s = tasks_mod.as_snapshot(snapshot)
+        if self.quantity == "annualized_qoq_pct":
+            return tasks_mod.annualized_qoq_pct(s, period)
+        return tasks_mod.pct_change(s, period, 1)
+
+
+# Same conventions as the tasks.py gold (annualized_qoq_pct, pct_change); rounding unit
+# 0.1 pp (published precision of growth rates). EMPLOY, RUC, PCPI are probed as levels.
+PROBE_RATES: dict[str, ProbeRate] = {
+    "ROUTPUT": ProbeRate(
+        "annualized_qoq_pct",
+        "the annualized quarter-over-quarter percent change of US real GDP (seasonally adjusted)",
+        quarterly=True,
+    ),
+    "IPT": ProbeRate(
+        "mom_pct",
+        "the month-over-month percent change of US industrial production (total index, "
+        "seasonally adjusted)",
+        quarterly=False,
+    ),
+}
+RATE_ROUNDING_UNIT = 0.1
+
+
+def probe_target(task: Task) -> tuple[str, list[str]]:
+    """(quantity, probed dates): ("level", key observations) or (rate name, [period])."""
+    rate = PROBE_RATES.get(task.series_id)
+    if rate is not None:
+        return rate.quantity, [iso(task.period)]
+    return "level", [iso(d) for d in tasks_mod.key_observations(task)]
+
+
 # --- prompts -------------------------------------------------------------------------
 
 
@@ -237,7 +343,15 @@ def turn2_message(task: Task, requests: list[dict[str, Any]], root: Path) -> str
 
 
 def probe_messages(task: Task) -> list[Message]:
-    dates = [iso(d) for d in tasks_mod.key_observations(task)]
+    quantity, dates = probe_target(task)
+    rate = PROBE_RATES.get(task.series_id)
+    if rate is not None:
+        user = PROBE_RATE_USER.format(
+            phrase=rate.phrase,
+            label=tasks_mod.period_label(day(task.period), rate.quarterly),
+            key=dates[0],
+        )
+        return [{"role": "system", "content": PROBE_SYSTEM}, {"role": "user", "content": user}]
     user = PROBE_USER.format(
         description=describe_series(task.series_id),
         period=_period_word(task.series_id),
@@ -271,7 +385,7 @@ def get_series(args: dict[str, Any], as_of: str, root: Path) -> dict[str, Any]:
     if known_ids and series_id not in known_ids:
         return {"error": f"unknown series {args.get('series_id')!r}"}
     try:
-        known = data.get_as_of(series_id, day(as_of), root)
+        known = as_of_series(series_id, as_of, root)
     except FileNotFoundError:
         if known_ids:
             raise  # data/raw missing for a known series: a setup error, not a model error
@@ -471,8 +585,9 @@ def run_probe(
     return ProbeRecord(
         task_id=task.id,
         agent=agent_name(agent),
-        dates=[iso(d) for d in tasks_mod.key_observations(task)],
+        dates=probe_target(task)[1],
         reply=parse_reply(resp.text, key="values"),
+        quantity=probe_target(task)[0],
         transcript=messages,
         input_tokens=resp.input_tokens,
         output_tokens=resp.output_tokens,
