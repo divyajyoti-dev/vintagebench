@@ -138,7 +138,12 @@ def test_cache_hit_makes_no_client_call(tmp_path):
     first = call(NATIVE, FakeClient(completion(text="hi")), tmp_path, task_id="t1", turn=1, trial=2)
     files = list(Path(tmp_path).rglob("*.json"))
     assert len(files) == 1
-    assert files[0].relative_to(tmp_path).parts[:3] == ("openai", "gpt-test", "t1")
+    assert files[0].relative_to(tmp_path).parts[:4] == (
+        "openai",
+        "gpt-test",
+        "openai_gpt-test",
+        "t1",
+    )
     assert files[0].name.startswith("turn1_trial2_step0_")
     empty = FakeClient()  # would raise IndexError if called
     again = call(NATIVE, empty, tmp_path, task_id="t1", turn=1, trial=2)
@@ -278,6 +283,7 @@ def test_reasoning_effort_changes_cache_key(tmp_path):
 # --- strict models.yaml loading ------------------------------------------------------
 
 ROW = "provider: openai, model_id: m, price_in: 1, price_out: 2, native_tools: true"
+TROW = "provider: openai, model_id: m, price_in: 1, price_out: 2, native_tools: false"
 
 
 def test_load_model_specs_reasoning_effort(tmp_path):
@@ -295,6 +301,8 @@ def test_load_model_specs_reasoning_effort(tmp_path):
         ("{provider: openai, model_id: m, price_in: 1, price_out: 2}", "missing \\['native_tools'"),
         (f"{{{ROW.replace('true', 'yes please')}}}", "native_tools must be"),
         (f"{{{ROW}, reasoning_effort: 3}}", "reasoning_effort must be a string"),
+        (f"{{{ROW}, reasoning_effort: low}}", "function calling only with"),
+        (f"{{{TROW}, max_tokens: lots}}", "max_tokens must be a number"),
         ("just a string", "expected a mapping"),
     ],
 )
@@ -312,12 +320,17 @@ def test_load_model_specs_rejects_non_list(tmp_path):
         models.load_model_specs(p)
 
 
-def test_repo_models_yaml_is_the_pilot_config():
+def test_repo_models_yaml_is_the_v1_config():
     specs = models.load_model_specs(Path(__file__).parents[1] / "config" / "models.yaml")
-    assert specs == [
-        ModelSpec("openai", "gpt-6-sol", 2.0, 10.0, True, "none"),
-        ModelSpec("openai", "gpt-6-luna", 0.1, 0.5, True, "none"),
+    assert [(s.name, s.model_id, s.reasoning_effort) for s in specs] == [
+        ("gpt-6-sol/reasoning-off", "gpt-6-sol", "none"),
+        ("gpt-6-sol/reasoning-low", "gpt-6-sol", "low"),
+        ("gpt-6-luna/reasoning-off", "gpt-6-luna", "none"),
+        ("gpt-6-luna/reasoning-low", "gpt-6-luna", "low"),
     ]
+    assert all(s.provider == "openai" and not s.native_tools for s in specs)
+    assert [s.max_tokens for s in specs] == [None, 8192, None, 8192]
+    assert [(s.price_in, s.price_out) for s in specs] == [(2.0, 10.0)] * 2 + [(0.1, 0.5)] * 2
 
 
 # --- measured usage from the cache ---------------------------------------------------
@@ -342,6 +355,99 @@ def test_cached_episode_usage(tmp_path):
     old = next(p for p in Path(tmp_path).rglob("t3/turn1_*.json") if '"old"' in p.read_text())
     os.utime(old, (1, 1))
     usage = models.cached_episode_usage(NATIVE, tmp_path)
-    assert usage == [(600, 60), (100, 10)]
+    assert [u[:2] for u in usage] == [(600, 60), (100, 10)]
+    assert usage[0][2] == pytest.approx(models.cost_usd(NATIVE, 600, 60))
     assert models.cached_episode_usage(TEXT, tmp_path) == []
     assert models.cached_episode_usage(NATIVE, tmp_path / "missing") == []
+
+
+# --- v1: config names, per-config max_tokens, reasoning-on, cached-token cost ---------
+
+LOW = ModelSpec(
+    "openai", "gpt-r", 2.0, 10.0, native_tools=False, reasoning_effort="low",
+    name="gpt-r/reasoning-low", max_tokens=8192, price_cached_in=0.2, price_cache_write=2.5,
+)  # fmt: skip
+
+
+def test_name_defaults_to_provider_model():
+    assert NATIVE.name == "openai/gpt-test"
+    assert LOW.name == "gpt-r/reasoning-low" and LOW.reasoning_on and not NATIVE.reasoning_on
+
+
+def test_reasoning_on_text_protocol_request(tmp_path):
+    client = FakeClient(completion(text='{"answer": "no"}'))
+    models.complete(LOW, MESSAGES, TOOLS, client=client, cache_dir=tmp_path, max_tokens=2048)
+    req = client.requests[0]
+    assert "temperature" not in req and "tools" not in req
+    assert req["reasoning_effort"] == "low" and req["max_completion_tokens"] == 8192
+    assert models.effective_max_tokens(LOW, 2048) == 8192
+    assert models.effective_max_tokens(NATIVE, 2048) == 2048
+
+
+def test_cache_dir_uses_config_name(tmp_path):
+    models.complete(LOW, MESSAGES, TOOLS, client=FakeClient(completion(text="a")),
+                    cache_dir=tmp_path, task_id="t1", turn=1)  # fmt: skip
+    (f,) = Path(tmp_path).rglob("*.json")
+    assert f.relative_to(tmp_path).parts[:4] == ("openai", "gpt-r", "gpt-r_reasoning-low", "t1")
+    other = ModelSpec("openai", "gpt-r", 2.0, 10.0, False, "low", name="other")
+    client = FakeClient(completion(text="b"))
+    models.complete(other, MESSAGES, TOOLS, client=client, cache_dir=tmp_path, task_id="t1",
+                    turn=1, max_tokens=8192)  # fmt: skip
+    assert len(client.requests) == 1  # same request, different config: not shared
+
+
+def test_usage_details_cost_and_reasoning_tokens(tmp_path):
+    c = completion(text="x", tin=1000, tout=500)
+    c.usage.prompt_tokens_details = SimpleNamespace(cached_tokens=600, cache_write_tokens=100)
+    c.usage.completion_tokens_details = SimpleNamespace(reasoning_tokens=300)
+    r = models.complete(LOW, MESSAGES, TOOLS, client=FakeClient(c), cache_dir=tmp_path)
+    expected = (300 * 2.0 + 600 * 0.2 + 100 * 2.5 + 500 * 10.0) / 1e6
+    assert r.cost_usd == pytest.approx(expected)
+    assert (r.reasoning_tokens, r.cached_input_tokens) == (300, 600)
+    again = models.complete(LOW, MESSAGES, TOOLS, client=FakeClient(), cache_dir=tmp_path)
+    assert again.cached and again.reasoning_tokens == 300
+
+
+def test_estimate_uses_highest_input_rate_and_full_output():
+    est = models.estimate_cost(LOW, MESSAGES, TOOLS, 8192)
+    chars = len(json.dumps(MESSAGES)) + len(json.dumps(TOOLS))
+    assert est == pytest.approx(((chars // 3 + 1) * 2.5 + 8192 * 10.0) / 1e6)
+
+
+def test_probe_turn_cached_and_counted_separately(tmp_path):
+    _cache(tmp_path, "t1", 1, 1, 0, 100, 10)
+    _cache(tmp_path, "t1", 2, 1, 0, 100, 10)
+    models.complete(NATIVE, MESSAGES, [], client=FakeClient(completion(text="p", tin=50, tout=5)),
+                    cache_dir=tmp_path, task_id="t1", turn="probe", trial=1)  # fmt: skip
+    assert any(f.name.startswith("turnprobe_trial1_step0_") for f in Path(tmp_path).rglob("*"))
+    assert [u[:2] for u in models.cached_episode_usage(NATIVE, tmp_path)] == [(200, 20)]
+    assert [u[:2] for u in models.cached_probe_usage(NATIVE, tmp_path)] == [(50, 5)]
+
+
+def test_budget_ledger_is_cumulative(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    b = Budget.from_ledger(1.0, ledger)
+    assert b.spent_usd == 0
+    b.charge(0.4)
+    b2 = Budget.from_ledger(1.0, ledger)
+    assert b2.spent_usd == pytest.approx(0.4)
+    with pytest.raises(BudgetExceeded):
+        b2.check(0.7)
+
+
+def test_load_model_specs_v1_fields(tmp_path):
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        f"- {{{TROW}, name: a/low, reasoning_effort: low, max_tokens: 8192, "
+        "price_cached_in: 0.1, price_cache_write: 1.25}\n"
+    )
+    (s,) = models.load_model_specs(p)
+    assert (s.name, s.max_tokens, s.price_cached_in, s.price_cache_write) == (
+        "a/low",
+        8192,
+        0.1,
+        1.25,
+    )
+    p.write_text(f"- {{{TROW}, name: x}}\n- {{{TROW}, name: x}}\n")
+    with pytest.raises(ValueError, match="duplicate config names"):
+        models.load_model_specs(p)

@@ -1,28 +1,32 @@
-"""CLI entry point (SPEC §4).
+"""CLI entry point (SPEC §4.6, §7).
 
-python -m vintagebench.run --models config/models.yaml --tasks tasks/pilot.jsonl
-    --trials 3 [--limit N] [--sanity]
--> runs/<timestamp>/results.jsonl + summary.md
+python -m vintagebench.run --models config/models.yaml --tasks tasks/v1.jsonl
+    --trials 3 [--limit N] [--sanity] [--probe] [--project-cost]
+-> runs/<timestamp>/results.jsonl (local only; runs/ is gitignored) + summary.md
+   (aggregate metrics only: no data values, no model text).
 
-``--sanity`` runs only the four sanity agents (no network, no keys, models file not
-read). Otherwise only the models in --models are run, with the budget cap from
-config/run.yaml enforced before every uncached call; when the cap would be exceeded the
-run stops, keeps the episodes finished so far, and exits with code 3.
-
-``--estimate`` prints the projected cost of the run described by the other arguments
-and exits without calling any API or writing a run directory. It uses measured
-per-episode tokens from the response cache when that model has cached episodes
-(e.g. after the smoke test), otherwise DEFAULT_EPISODE_TOKENS.
-
-summary.md also has a "Model settings" section (temperature actually sent,
-reasoning_effort, max output tokens, tool protocol) and a "Diagnostics" section (JSON
-parse rate per turn, tool-call success, tool calls, tokens and cost per episode).
+- ``--sanity`` runs only the no-API sanity agents (oracle, always_yes, leaker,
+  never_update; with ``--probe`` also first_release_recaller and latest_recaller),
+  checks their expected scores (sanity.check_expectations) and exits 4 on a mismatch.
+  No network, no keys, models file not read.
+- Otherwise the model configs in --models run. Before any paid call the sanity agents
+  are run in memory on the same tasks (1 trial); if any expected score is missed the
+  run aborts with exit 4 and calls no API.
+- ``--probe`` also runs the memorization probe (1 call per task and config, trial 1).
+- ``--project-cost`` prints and writes runs/<timestamp>/projection.md: projected cost
+  per config of the run described by the other arguments (tasks x trials episodes +
+  probe), from measured per-episode / per-probe cost in the response cache (i.e. after
+  the smoke test), falling back to PRIOR_* estimates. Calls no API.
+- Budget: the cap in config/run.yaml is cumulative over all runs sharing the cache dir
+  (ledger <cache>/spend_ledger.json). It is enforced before every uncached call; when
+  it would be exceeded the run stops, keeps what finished, and exits 3.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import datetime
@@ -32,17 +36,20 @@ from typing import Any
 import yaml
 
 from vintagebench import data, grader, models, sanity
-from vintagebench.episode import Agent, EpisodeRecord, run_episode
+from vintagebench.episode import Agent, EpisodeRecord, ProbeRecord, run_episode, run_probe
 from vintagebench.tasks import Task, load_tasks
 
 REPO = Path(__file__).resolve().parents[2]
 RUN_CONFIG = REPO / "config" / "run.yaml"
 RUNS_DIR = REPO / "runs"
+DATA_ROOT: Path = getattr(data, "RAW_DIR", getattr(data, "DATA_DIR", REPO / "data" / "raw"))
+LEDGER_NAME = "spend_ledger.json"
 EXIT_BUDGET = 3
-# Prior per-episode (input, output) token estimates from the episode.py prompts with
-# reasoning off: typical = 4 calls (~410/1060/1290/1940 input, ~500 output in all);
-# high = 6 calls with ~1k output each.
-DEFAULT_EPISODE_TOKENS = {"typical": (5_000, 500), "high": (12_000, 6_000)}
+EXIT_SANITY = 4
+# Prior (input, output) token estimates when nothing is cached yet. Episodes: about 4
+# calls of ~1-2.5k input; reasoning-on adds reasoning tokens (billed as output).
+PRIOR_EPISODE_TOKENS = {False: (6_000, 800), True: (6_000, 4_000)}
+PRIOR_PROBE_TOKENS = {False: (300, 100), True: (300, 1_500)}
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -53,11 +60,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--trials", type=int, default=None, help="default: trials in run.yaml")
     p.add_argument("--limit", type=int, default=None, help="only the first N tasks")
     p.add_argument("--sanity", action="store_true", help="run only the no-API sanity agents")
-    p.add_argument("--data-root", type=Path, default=data.DATA_DIR)
+    p.add_argument("--probe", action="store_true", help="also run the memorization probe")
+    p.add_argument(
+        "--project-cost", action="store_true", help="project the run's cost; call no API"
+    )
+    p.add_argument("--data-root", type=Path, default=DATA_ROOT)
     p.add_argument("--run-config", type=Path, default=RUN_CONFIG)
     p.add_argument("--out-dir", type=Path, default=RUNS_DIR, help="parent of runs/<timestamp>")
     p.add_argument("--cache-dir", type=Path, default=None, help="default: <out-dir>/cache")
-    p.add_argument("--estimate", action="store_true", help="print the projected cost; call no API")
     return p.parse_args(argv)
 
 
@@ -68,6 +78,9 @@ def load_run_config(path: Path) -> dict[str, Any]:
         "trials": int(cfg.get("trials", 3)),
         "temperature": float(cfg.get("temperature", 0)),
         "max_tokens": int(cfg.get("max_tokens", 2048)),
+        "projection_threshold_usd": float(cfg.get("projection_threshold_usd", 8)),
+        "fallback_trials": int(cfg.get("fallback_trials", 2)),
+        "fallback_drop": list(cfg.get("fallback_drop") or []),
     }
 
 
@@ -80,24 +93,23 @@ def _new_run_dir(out_dir: Path) -> Path:
     return run_dir
 
 
+def _cache_dir(args: argparse.Namespace) -> Path:
+    return args.cache_dir or args.out_dir / "cache"
+
+
 def _share(flags: list[bool]) -> str:
-    return f"{sum(flags)}/{len(flags)} ({sum(flags) / len(flags):.0%})"
+    return f"{sum(flags)}/{len(flags)} ({sum(flags) / len(flags):.0%})" if flags else "n/a"
 
 
-def yes_share_line(tasks: list[Task]) -> str:
-    """Share of yes/no tasks whose gold is Yes, as of and revised, plus the
-    majority-class baseline (always giving the more common as-of / revised answer)."""
-    yn = [t for t in tasks if t.answer_type == "yes_no"]
-    if not yn:
-        return "- yes share: no yes/no tasks"
-    asof = [bool(t.gold_as_of) for t in yn]
-    rev = [bool(t.gold_revised) for t in yn]
-    base_asof = asof if sum(asof) * 2 >= len(asof) else [not x for x in asof]
-    base_rev = rev if sum(rev) * 2 >= len(rev) else [not x for x in rev]
+def task_mix_line(tasks: list[Task]) -> str:
+    """Task counts by kind and the Yes share of the golds (counts only)."""
+    kinds = Counter(t.kind for t in tasks)
+    mix = ", ".join(f"{k} {kinds.get(k, 0)}" for k in grader.KINDS)
+    asof = [bool(t.gold_as_of) for t in tasks]
+    rev = [bool(t.gold_revised) for t in tasks]
     return (
-        f"- yes share ({len(yn)} yes/no tasks): gold_as_of = Yes {_share(asof)}, "
-        f"gold_revised = Yes {_share(rev)}; majority-class baseline: "
-        f"asof_correct {_share(base_asof)}, revised_correct {_share(base_rev)}"
+        f"- tasks by kind: {mix} (total {len(tasks)}); gold_as_of = Yes {_share(asof)}, "
+        f"gold_revised = Yes {_share(rev)}"
     )
 
 
@@ -106,44 +118,49 @@ def _rate(n: int, d: int) -> str:
 
 
 def settings_markdown(agents: list[Agent], cfg: dict[str, Any]) -> str:
-    """Effective request settings per agent."""
+    """Effective request settings per config."""
     lines = [
-        "| Agent | temperature sent | reasoning_effort | max output tokens | tool protocol |",
-        "|---|---|---|---|---|",
+        "| Config | Model ID | temperature sent | reasoning_effort | max output tokens "
+        "| tool protocol | price in / out (USD per 1M) |",
+        "|---|---|---|---|---|---|---|",
     ]
     for a in agents:
         if not isinstance(a, models.ModelSpec):
-            lines.append(f"| {a.name} | n/a (no API) | n/a | n/a | native loop |")
+            lines.append(f"| {a.name} | n/a (no API) | n/a | n/a | n/a | native loop | 0 |")
             continue
         st = models.effective_settings(a, cfg["temperature"])
         temp = f"yes ({st['temperature']:g})" if st["temperature_sent"] else "no (omitted)"
         effort = st["reasoning_effort"] or "not sent"
         proto = "native" if a.native_tools else "plain-text JSON"
-        lines.append(f"| {a.name} | {temp} | {effort} | {cfg['max_tokens']} | {proto} |")
+        mx = models.effective_max_tokens(a, cfg["max_tokens"])
+        lines.append(
+            f"| {a.name} | {a.model_id} | {temp} | {effort} | {mx} | {proto} "
+            f"| {a.price_in:g} / {a.price_out:g} |"
+        )
     return "\n".join(lines)
 
 
 def episode_diagnostics(rec: EpisodeRecord) -> dict[str, Any]:
-    """Parse success per turn, tool calls (ok vs error), tokens and cost of one episode."""
+    """Tool calls (ok vs error), re-served requests, tokens and cost of one episode."""
     tool_results = [json.loads(m["content"]) for m in rec.transcript if m["role"] == "tool"]
     errors = sum(1 for r in tool_results if isinstance(r, dict) and "error" in r)
     return {
-        "turn1_parsed": "_error" not in rec.turn1,
-        "turn2_parsed": "_error" not in rec.turn2,
         "tool_calls": len(tool_results),
         "tool_errors": errors,
+        "turn1_requests": len(rec.turn1_requests),
         "input_tokens": rec.input_tokens,
         "output_tokens": rec.output_tokens,
+        "reasoning_tokens": rec.reasoning_tokens,
         "cost_usd": rec.cost_usd,
     }
 
 
 def diagnostics_markdown(records: list[EpisodeRecord]) -> str:
-    """Per-agent JSON parse rate per turn, tool-call success, tool calls, tokens, cost."""
+    """Per config: tool-call success, tool calls, re-served requests, tokens, cost."""
     lines = [
-        "| Agent | Episodes | Turn-1 JSON parsed | Turn-2 JSON parsed | Tool calls returning "
-        "data | Avg tool calls / episode | Avg input tokens / episode | Avg output tokens "
-        "/ episode | Avg cost / episode (USD) |",
+        "| Config | Episodes | Tool calls returning data | Avg tool calls / episode "
+        "| Episodes with no turn-1 request | Avg input tokens / episode | Avg output tokens "
+        "/ episode | Avg reasoning tokens / episode | Avg cost / episode (USD) |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     by_agent: dict[str, list[dict[str, Any]]] = {}
@@ -153,84 +170,159 @@ def diagnostics_markdown(records: list[EpisodeRecord]) -> str:
         n = len(ds)
         calls = sum(d["tool_calls"] for d in ds)
         ok = calls - sum(d["tool_errors"] for d in ds)
+        none = sum(d["turn1_requests"] == 0 for d in ds)
         lines.append(
-            f"| {agent} | {n} | {_rate(sum(d['turn1_parsed'] for d in ds), n)} "
-            f"| {_rate(sum(d['turn2_parsed'] for d in ds), n)} | {_rate(ok, calls)} "
-            f"| {calls / n:.1f} | {sum(d['input_tokens'] for d in ds) / n:,.0f} "
+            f"| {agent} | {n} | {_rate(ok, calls)} | {calls / n:.1f} | {_rate(none, n)} "
+            f"| {sum(d['input_tokens'] for d in ds) / n:,.0f} "
             f"| {sum(d['output_tokens'] for d in ds) / n:,.0f} "
+            f"| {sum(d['reasoning_tokens'] for d in ds) / n:,.0f} "
             f"| {sum(d['cost_usd'] for d in ds) / n:.5f} |"
         )
     return "\n".join(lines)
 
 
-def estimate_markdown(
-    specs: list[models.ModelSpec], episodes: int, cache_dir: Path, budget_usd: float
-) -> tuple[str, float]:
-    """Projected cost table for ``episodes`` episodes per model; returns (text, typical total).
+# --- cost projection -----------------------------------------------------------------
 
-    Measured basis: mean (typical) and max (high) per-episode tokens from the cache.
-    Prior basis: DEFAULT_EPISODE_TOKENS. Costs use the spec's current prices.
-    """
-    lines = [
-        f"Projected cost: {episodes} episodes per model (no API calls made).",
-        "",
-        "| Model | Basis | Tokens / episode in, out (typical) | Cost / episode (typical) "
-        "| Projected (typical) | Projected (high) |",
-        "|---|---|---|---|---|---|",
-    ]
-    total = total_high = 0.0
+
+def _per_call_cost(
+    spec: models.ModelSpec, usage: list[tuple[int, int, float]], prior: tuple[int, int]
+) -> tuple[float, float, str]:
+    """(mean cost, max cost, basis) from measured usage, else the prior."""
+    if usage:
+        costs = [u[2] for u in usage]
+        return sum(costs) / len(costs), max(costs), f"measured (n={len(usage)})"
+    c = models.cost_usd(spec, *prior)
+    return c, c, "prior estimate"
+
+
+def project_costs(
+    specs: list[models.ModelSpec], n_tasks: int, trials: int, cache_dir: Path
+) -> list[dict[str, Any]]:
+    """Per-config projection: per-episode cost x tasks x trials + per-probe cost x tasks."""
+    rows = []
     for spec in specs:
-        usage = models.cached_episode_usage(spec, cache_dir)
-        if usage:
-            n = len(usage)
-            typ = (sum(u[0] for u in usage) / n, sum(u[1] for u in usage) / n)
-            high = max(usage, key=lambda u: models.cost_usd(spec, u[0], u[1]))
-            basis = f"measured ({n} cached episode{'s' if n > 1 else ''}; high = max)"
-        else:
-            typ, high = DEFAULT_EPISODE_TOKENS["typical"], DEFAULT_EPISODE_TOKENS["high"]
-            basis = "prior estimate"
-        per_ep = models.cost_usd(spec, typ[0], typ[1])
-        proj, proj_high = per_ep * episodes, models.cost_usd(spec, *high) * episodes
-        total, total_high = total + proj, total_high + proj_high
-        lines.append(
-            f"| {spec.name} | {basis} | {typ[0]:,.0f}, {typ[1]:,.0f} | ${per_ep:.4f} "
-            f"| ${proj:.2f} | ${proj_high:.2f} |"
+        ep, ep_high, ep_basis = _per_call_cost(
+            spec,
+            models.cached_episode_usage(spec, cache_dir),
+            PRIOR_EPISODE_TOKENS[spec.reasoning_on],
         )
-    verdict = "within" if total_high <= budget_usd else "the high case EXCEEDS"
-    lines += [
-        "",
-        f"Total: ${total:.2f} typical, ${total_high:.2f} high; budget cap ${budget_usd:.2f} "
-        f"({verdict} the cap; the run stops before exceeding it). Episodes already in the "
-        "cache rerun for free, so actual new spend can be lower.",
+        pr, pr_high, pr_basis = _per_call_cost(
+            spec, models.cached_probe_usage(spec, cache_dir), PRIOR_PROBE_TOKENS[spec.reasoning_on]
+        )
+        episodes = n_tasks * trials
+        rows.append(
+            {
+                "config": spec.name,
+                "episode_basis": ep_basis,
+                "probe_basis": pr_basis,
+                "cost_per_episode": ep,
+                "cost_per_probe": pr,
+                "episodes": episodes,
+                "probes": n_tasks,
+                "projected": ep * episodes + pr * n_tasks,
+                "projected_high": ep_high * episodes + pr_high * n_tasks,
+            }
+        )
+    return rows
+
+
+def _projection_table(rows: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "| Config | Episode basis | Cost / episode | Probe basis | Cost / probe "
+        "| Episodes | Probes | Projected (mean) | Projected (high = max) |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
-    return "\n".join(lines), total
+    for r in rows:
+        lines.append(
+            f"| {r['config']} | {r['episode_basis']} | ${r['cost_per_episode']:.4f} "
+            f"| {r['probe_basis']} | ${r['cost_per_probe']:.5f} | {r['episodes']} "
+            f"| {r['probes']} | ${r['projected']:.2f} | ${r['projected_high']:.2f} |"
+        )
+    total = sum(r["projected"] for r in rows)
+    high = sum(r["projected_high"] for r in rows)
+    lines += ["", f"Total: ${total:.2f} mean, ${high:.2f} high."]
+    return lines
+
+
+def projection_markdown(
+    specs: list[models.ModelSpec],
+    n_tasks: int,
+    trials: int,
+    cache_dir: Path,
+    cfg: dict[str, Any],
+    spent_usd: float,
+) -> tuple[str, float]:
+    """Projection text (plan per SPEC §7) and the projected mean total of the full plan."""
+    rows = project_costs(specs, n_tasks, trials, cache_dir)
+    total = sum(r["projected"] for r in rows)
+    cap, thr = cfg["budget_usd"], cfg["projection_threshold_usd"]
+    lines = [
+        "# Projected cost (no API calls made)",
+        "",
+        f"- plan: {n_tasks} tasks x {trials} trials per config + memorization probe "
+        f"({n_tasks} calls per config)",
+        f"- budget cap ${cap:.2f} (cumulative); already spent ${spent_usd:.4f}; "
+        f"remaining ${cap - spent_usd:.4f}",
+        f"- SPEC §7 threshold ${thr:.2f}: projected mean ${total:.2f} is "
+        + ("within it." if total <= thr else "ABOVE it; fallback plan below."),
+        "- cached episodes rerun for free, so actual new spend can be lower.",
+        "",
+        "## Full plan",
+        "",
+        *_projection_table(rows),
+    ]
+    if total > thr:
+        keep = [s for s in specs if s.name not in cfg["fallback_drop"]]
+        fb = project_costs(keep, n_tasks, cfg["fallback_trials"], cache_dir)
+        dropped = ", ".join(cfg["fallback_drop"]) or "none"
+        lines += [
+            "",
+            f"## Fallback: {cfg['fallback_trials']} trials, dropping {dropped}",
+            "",
+            *_projection_table(fb),
+        ]
+    return "\n".join(lines) + "\n", total
+
+
+# --- running -------------------------------------------------------------------------
 
 
 def _write_summary(
     path: Path,
     scores: list[grader.Scores],
+    probes: list[grader.ProbeScores],
     tasks: list[Task],
     args: argparse.Namespace,
     note: str,
     agents: list[Agent],
     records: list[EpisodeRecord],
     cfg: dict[str, Any],
+    sanity_failures: list[str] | None = None,
 ) -> None:
     lines = [
         "# VintageBench run summary",
         "",
-        f"- tasks: {args.tasks}",
-        f"- mode: {'sanity agents' if args.sanity else 'models'}",
-        f"- status: {note}",
-        yes_share_line(tasks),
+        "Aggregate metrics only (SPEC §2.3); per-episode results stay in results.jsonl.",
         "",
-        grader.summary_markdown(scores),
+        f"- tasks file: {args.tasks}",
+        f"- mode: {'sanity agents' if args.sanity else 'models'}"
+        + (" + memorization probe" if args.probe else ""),
+        f"- trials: {args.trials}",
+        f"- status: {note}",
+        task_mix_line(tasks),
+    ]
+    if sanity_failures is not None:
+        verdict = "PASS" if not sanity_failures else f"FAIL ({len(sanity_failures)} checks)"
+        lines.append(f"- sanity expectations: {verdict}")
+    lines += [
+        "",
+        grader.summary_markdown(scores, probes),
         "",
         "## Model settings",
         "",
         settings_markdown(agents, cfg),
         "",
-        "## Diagnostics",
+        "## Episode diagnostics",
         "",
         diagnostics_markdown(records),
         "",
@@ -238,43 +330,135 @@ def _write_summary(
     path.write_text("\n".join(lines))
 
 
-def run(
-    args: argparse.Namespace, agents: list[Agent], tasks: list[Task], cfg: dict[str, Any]
-) -> tuple[Path, int]:
-    """Run all (agent, task, trial) episodes; returns (run dir, exit code)."""
-    run_dir = _new_run_dir(args.out_dir)
-    budget = models.Budget(cfg["budget_usd"])
-    model_kwargs = {
-        "cache_dir": args.cache_dir or args.out_dir / "cache",
+def _model_kwargs(args: argparse.Namespace, cfg: dict[str, Any], budget: models.Budget) -> dict:
+    return {
+        "cache_dir": _cache_dir(args),
         "budget": budget,
         "temperature": cfg["temperature"],
         "max_tokens": cfg["max_tokens"],
     }
+
+
+def run_agents(
+    agents: list[Agent],
+    probe_agents: list[Agent],
+    tasks: list[Task],
+    trials: int,
+    root: Path,
+    model_kwargs: dict[str, Any] | None = None,
+    out: Any = None,
+) -> tuple[list[grader.Scores], list[grader.ProbeScores], list[EpisodeRecord]]:
+    """Run episodes for ``agents`` and the probe for ``probe_agents``, grading each.
+
+    Rows are written to ``out`` (results.jsonl) as they finish. BudgetExceeded
+    propagates; what finished is in the returned lists only if no exception occurs,
+    so callers that need partial results pass ``out``.
+    """
     scores: list[grader.Scores] = []
+    probes: list[grader.ProbeScores] = []
     records: list[EpisodeRecord] = []
+
+    def emit(row: dict[str, Any]) -> None:
+        if out is not None:
+            out.write(json.dumps(row, default=str) + "\n")
+            out.flush()
+
+    for agent in agents:
+        for task in tasks:
+            for trial in range(1, trials + 1):
+                rec = run_episode(task, agent, trial, root, model_kwargs=model_kwargs)
+                s = grader.grade(task, rec, root)
+                scores.append(s)
+                records.append(rec)
+                emit(
+                    {
+                        "type": "episode",
+                        "scores": asdict(s),
+                        "diagnostics": episode_diagnostics(rec),
+                        "record": asdict(rec),
+                    }
+                )
+    for agent in probe_agents:
+        for task in tasks:
+            prec: ProbeRecord = run_probe(task, agent, root, model_kwargs=model_kwargs)
+            ps = grader.grade_probe(task, prec, root)
+            probes.append(ps)
+            emit({"type": "probe", "scores": asdict(ps), "record": asdict(prec)})
+    return scores, probes, records
+
+
+def sanity_gate(tasks: list[Task], root: Path, probe: bool) -> list[str]:
+    """Run the sanity agents in memory (1 trial) and return expectation failures."""
+    probe_agents = list(sanity.PROBE_AGENTS) if probe else []
+    scores, probes, _ = run_agents(list(sanity.SANITY_AGENTS), probe_agents, tasks, 1, root)
+    return sanity.check_expectations(scores, probes, tasks, root)
+
+
+class _Collector:
+    """File-like sink that keeps graded rows so a budget stop keeps partial results."""
+
+    def __init__(self, fh: Any) -> None:
+        self.fh = fh
+        self.rows: list[dict[str, Any]] = []
+
+    def write(self, s: str) -> None:
+        self.fh.write(s)
+        if s.strip():
+            self.rows.append(json.loads(s))
+
+    def flush(self) -> None:
+        self.fh.flush()
+
+
+def _rebuild(rows: list[dict[str, Any]]) -> tuple[list, list, list]:
+    scores = [grader.Scores(**r["scores"]) for r in rows if r["type"] == "episode"]
+    probes = [grader.ProbeScores(**r["scores"]) for r in rows if r["type"] == "probe"]
+    records = [EpisodeRecord(**r["record"]) for r in rows if r["type"] == "episode"]
+    return scores, probes, records
+
+
+def run(
+    args: argparse.Namespace,
+    agents: list[Agent],
+    probe_agents: list[Agent],
+    tasks: list[Task],
+    cfg: dict[str, Any],
+) -> tuple[Path, int]:
+    """Run all episodes and probes; returns (run dir, exit code)."""
+    run_dir = _new_run_dir(args.out_dir)
+    budget = models.Budget.from_ledger(cfg["budget_usd"], _cache_dir(args) / LEDGER_NAME)
+    start_spent = budget.spent_usd
     note, code = "complete", 0
-    with (run_dir / "results.jsonl").open("w") as out:
+    with (run_dir / "results.jsonl").open("w") as fh:
+        sink = _Collector(fh)
         try:
-            for agent in agents:
-                for task in tasks:
-                    for trial in range(1, args.trials + 1):
-                        rec = run_episode(
-                            task, agent, trial, args.data_root, model_kwargs=model_kwargs
-                        )
-                        s = grader.grade(task, rec, args.data_root)
-                        scores.append(s)
-                        records.append(rec)
-                        row = {
-                            "scores": asdict(s),
-                            "diagnostics": episode_diagnostics(rec),
-                            "record": asdict(rec),
-                        }
-                        out.write(json.dumps(row) + "\n")
-                        out.flush()
+            run_agents(
+                agents,
+                probe_agents,
+                tasks,
+                args.trials,
+                args.data_root,
+                _model_kwargs(args, cfg, budget),
+                sink,
+            )
         except models.BudgetExceeded as exc:
             note, code = f"STOPPED at budget cap: {exc}", EXIT_BUDGET
-    note += f"; spent this run ${budget.spent_usd:.4f} of ${budget.limit_usd:.2f}"
-    _write_summary(run_dir / "summary.md", scores, tasks, args, note, agents, records, cfg)
+    scores, probes, records = _rebuild(sink.rows)
+    failures = None
+    if args.sanity:
+        failures = sanity.check_expectations(scores, probes, tasks, args.data_root)
+        if failures and code == 0:
+            code = EXIT_SANITY
+    note += (
+        f"; spent this run ${budget.spent_usd - start_spent:.4f}; cumulative "
+        f"${budget.spent_usd:.4f} of ${budget.limit_usd:.2f}"
+    )
+    _write_summary(
+        run_dir / "summary.md", scores, probes, tasks, args, note, agents + probe_agents,
+        records, cfg, failures,
+    )  # fmt: skip
+    if failures:
+        (run_dir / "sanity_failures.txt").write_text("\n".join(failures) + "\n")
     return run_dir, code
 
 
@@ -284,27 +468,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg = load_run_config(args.run_config)
     if args.trials is None:
         args.trials = cfg["trials"]
-    tasks = load_tasks(args.tasks)
+    tasks = load_tasks(args.tasks, args.data_root)
     if args.limit is not None:
         tasks = tasks[: args.limit]
-    if args.estimate:
+    if args.project_cost:
         if args.sanity:
             print("sanity agents make no API calls: projected cost $0.00")
             return 0
         specs = models.load_model_specs(args.models)
-        episodes = len(tasks) * args.trials
-        cache_dir = args.cache_dir or args.out_dir / "cache"
-        text, _ = estimate_markdown(specs, episodes, cache_dir, cfg["budget_usd"])
+        cache = _cache_dir(args)
+        spent = models.Budget.from_ledger(cfg["budget_usd"], cache / LEDGER_NAME).spent_usd
+        text, _ = projection_markdown(specs, len(tasks), args.trials, cache, cfg, spent)
+        run_dir = _new_run_dir(args.out_dir)
+        (run_dir / "projection.md").write_text(text)
         print(text)
+        print(f"wrote {run_dir / 'projection.md'}")
         return 0
     if args.sanity:
         agents: list[Agent] = list(sanity.SANITY_AGENTS)
+        probe_agents: list[Agent] = list(sanity.PROBE_AGENTS) if args.probe else []
     else:
         agents = list(models.load_model_specs(args.models))
         if not agents:
             print(f"no models in {args.models}")
             return 2
-    run_dir, code = run(args, agents, tasks, cfg)
+        probe_agents = list(agents) if args.probe else []
+        failures = sanity_gate(tasks, args.data_root, args.probe)
+        if failures:
+            print(f"sanity agents missed {len(failures)} expected scores; no API called:")
+            print("\n".join(failures[:20]))
+            return EXIT_SANITY
+    run_dir, code = run(args, agents, probe_agents, tasks, cfg)
     print(f"wrote {run_dir / 'results.jsonl'} and {run_dir / 'summary.md'}")
     print((run_dir / "summary.md").read_text())
     return code
