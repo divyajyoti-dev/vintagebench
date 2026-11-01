@@ -1,6 +1,6 @@
 """Regenerate tests/fixtures/vintages/TOY.parquet (run from repo root).
 
-TOY: 12 monthly observations (2020-01..2020-12), 3 vintages. Like ALFRED, each
+TOY: 12 monthly observations (2020-01..2020-12), 3 vintages. Stored sparsely: each
 later vintage only carries the observations it revised.
 - 2021-01-15: first release of all 12 months.
 - 2021-02-15: June revised 101.5 -> 100.8, flipping June's MoM change from
