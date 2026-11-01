@@ -1,103 +1,173 @@
-# VintageBench spec
+# VintageBench spec (v1)
+
+v1 replaces the v0 data source (ALFRED/FRED, removed; see §8) with the Philadelphia Fed
+Real-Time Data Set for Macroeconomists (RTDSM) and changes the episode protocol (§4).
 
 ## 1. Goal and metrics
 Can an AI analyst reason correctly about provisional data that later gets revised?
-- asof_correct: right answer using only data published by the task's as-of date
-- leakage: uses values from later vintages (e.g. memorized revised figures)
-- calibration: Brier score of stated confidence on first-turn answers
-- update_correct: after revised data arrives, changes exactly the conclusions that
-  should change (penalizes missed AND unnecessary updates)
+- asof_correct: turn-1 answer equals the gold computed from the as-of vintage
+- revised_correct: turn-2 answer equals the gold computed from the revision vintage
+- update_correct: changed == flips, where changed = (turn-2 answer != turn-1 answer).
+  The self-reported `changed` flag is kept only as a diagnostic (agreement rate).
+- survival calibration: turn-1 `survival_prob` (probability the conclusion still holds
+  after the data are fully revised) scored against survived = (turn-1 answer ==
+  gold_revised); Brier score, mean survival_prob vs empirical survival rate, and a
+  reliability table (bins 0-0.5, 0.5-0.8, 0.8-0.95, 0.95-1.0)
+- confidence Brier: turn-1 confidence vs asof_correct
+- leakage: a values_used entry matches a later vintage but not the as-of vintage
+  (rounding tolerance)
+- label/text contradiction: the answer label disagrees with the answer implied by the
+  model's own reported values_used (gold function applied to them), or with an explicit
+  final conclusion in `calculation` (regex: "answer is yes/no", "so yes/no", etc.)
+- memorization probe (§4.4): share of recalled key observations matching the first
+  release, the latest vintage, both (indistinguishable), or neither
 
-## 2. Data
-- Series: PAYEMS, GDPC1, PCEPI, INDPRO, UNRATE (UNRATE = low-revision control).
-- Observations from 2015 onward; vintages from 2016 onward. Pull via the ALFRED API
-  (series/vintagedates; series/observations with realtime_start/realtime_end) or
-  fredapi; verify behavior against official docs.
-- Storage: data/vintages/<SERIES>.parquet, columns series_id, observation_date,
-  vintage_date, value. Committed to the repo.
-- get_as_of returns, per observation, the latest value with vintage_date <= as_of date.
-- data/README.md: per series, number of vintages and mean absolute revision
-  (first release vs latest).
-- Tests: as-of never returns future vintages; two dates give different values for a
-  shared observation; one documented real revision reproduced (source cited in comment).
+## 2. Data (RTDSM)
+- Source: Federal Reserve Bank of Philadelphia, Real-Time Data Set for Macroeconomists,
+  https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/real-time-data-set-for-macroeconomists
+  Terms and citation: data/NOTICE.md. Redistribution is not clearly granted, so the
+  repository commits **no raw data** (§2.3).
+- Series (RTDSM variable, file): EMPLOY (nonfarm payrolls, employMvMd.xlsx), ROUTPUT
+  (real GDP, routputMvQd.xlsx), IPT (industrial production total, iptMvMd.xlsx), RUC
+  (unemployment rate, rucQvMd.xlsx; quarterly vintages, low-revision control), PCPI
+  (CPI; substitute for a monthly PCE price index, which RTDSM does not provide with
+  monthly vintages). Mapping and verification: data/README.md.
+- Vintages: RTDSM columns are periodic snapshots (monthly for EMPLOY, ROUTPUT, IPT, PCPI;
+  quarterly, mid-quarter, for RUC). Each vintage label (e.g. EMPLOY18M11) is mapped to a
+  vintage_date on or after the latest release it incorporates (rule per series in
+  data/README.md, quoting RTDSM docs). Task as_of_date and revision_date are always
+  RTDSM vintage dates.
+- Range: observations from 2015 onward; vintages from 2016 onward up to the pinned last
+  vintage in data/manifest.json.
+
+### 2.1 Interfaces (data.py)
+- load_vintages(series_id, root=RAW_DIR) -> DataFrame (series_id, observation_date,
+  vintage, vintage_date, value), parsed from the downloaded xlsx and cached as
+  parquet in data/raw/ (gitignored)
+- vintage_dates(series_id, root=RAW_DIR) -> list[date] (pinned range only)
+- get_as_of(series_id, as_of: date, root=RAW_DIR) -> pd.Series: the full column of the
+  latest vintage with vintage_date <= as_of (index observation_date)
+- first_release(series_id, obs, root) and latest_value(series_id, obs, root) for the
+  memorization probe and base rates
+
+### 2.2 Fetch and verification
+- scripts/fetch_data.py downloads the five xlsx files to data/raw/ and verifies them:
+  data/checksums.json (committed) stores per series the SHA-256 of the canonical parsed
+  table restricted to the pinned vintages (robust to RTDSM appending new vintages each
+  month) and the SHA-256 of the file as downloaded on the pin date (informational).
+- Missing data/raw -> clear error telling the user to run scripts/fetch_data.py.
+
+### 2.3 No raw values in the repository
+- Not committed: xlsx, parquet, tool responses, model prompts/responses, per-episode
+  results (runs/ is gitignored except runs/README.md).
+- Tasks store only definitions (series, template, period, threshold, dates, kind);
+  golds and margins are computed at load time from the local data.
+- Committed results are aggregate metrics only. Docs never quote data values; quoted
+  model text has numbers redacted as [value].
+- Tests use small synthetic fixtures, never RTDSM values.
 
 ## 3. Tasks
-Schema (tasks/pilot.jsonl): id, series_id, as_of_date, question,
-answer_type ("yes_no"|"number"), gold_as_of, revision_date, gold_revised, flips, notes.
-- Gold answers computed programmatically from the two vintages; never hand-labeled.
-- Templates (natural questions; thresholds only at round numbers):
-  "Did real GDP shrink in <quarter>?"
-  "Did real GDP grow faster than 2% (annualized) in <quarter>?"
-  "Was <month> the weakest month for payroll growth in the prior 12 months?"
-  "Was average monthly payroll growth over the 3 months ending <month> above 100k/150k?"
-  "Did industrial production fall in <month> versus the prior month?"
-  "Is PCE inflation (year over year) above 2.5% for <month>?"
-- Pilot selection: 20 tasks across 2016–2025: ~10 with flips=true, ~10 controls
-  (including 2 UNRATE). Spread across series and years; no duplicates. Seeded.
-  - Materiality: a candidate is kept only if, in both the as-of and revised vintages,
-    the deciding quantity clears its threshold by about half a publication unit
-    (e.g. 0.05 for % changes, 1k jobs for payrolls); see tasks/README.md.
-  - Stratified on flips × as-of answer (5/5/5/5; the 2 UNRATE controls are 1 Yes,
-    1 No). Controls whose computation window touches the COVID collapse
-    (Mar–Jun 2020; 2020 Q1–Q3 for GDP) are excluded; flips there stay eligible.
-  - Non-UNRATE controls farther than a per-template cap (10 margins; 5 for GDP shrink; 40 for PAYEMS) from the threshold in both vintages are excluded as trivial.
-  - 60-task extension (tasks/pilot60.jsonl, tasks/README60.md): the 20 pilot tasks kept byte-identical and first, in pilot.jsonl order, then 40 from extend_pilot(existing, candidates, n_total=60, seed=0) sorted by id, under the same rules plus, for new tasks only, revision_date - as_of_date >= 365 days and avoidance of same-series computation-window overlap unless no non-overlapping candidate can fill the slot (overlap clusters via task_clusters); target 15/15/15/15 on flips × as-of answer, 6 UNRATE controls (3 Yes, 3 No).
-- tasks/README.md: table of all tasks (question, as-of answer, revised answer, flips).
+- Schema (tasks/v1.jsonl): id, series_id, template, period, threshold, as_of_date,
+  revision_date, question, answer_type ("yes_no"), kind ("flip"|"control"|"no_change"),
+  notes. load_tasks(path, root) recomputes gold_as_of, gold_revised, flips and margins
+  and fails if they disagree with kind.
+- Questions state the question, not the formula (e.g. "Did US real GDP shrink in
+  2018 Q4?"). Conventions used for gold (documented in tasks/README.md): GDP growth =
+  annualized quarter-over-quarter percent change of the level; payroll change = level
+  difference in thousands; IP fell = month-over-month level decline; inflation =
+  12-month percent change of CPI; unemployment rose = month-over-month increase.
+- Gold answers computed programmatically from the two vintages; never hand-labeled;
+  every gold function has a unit test.
+- Selection (select_v1(candidates, seed=0)): 45 tasks = 20 flips, 20 controls,
+  5 no-change. As-of answer balanced Yes/No within each kind (10/10, 10/10, 3/2 or
+  2/3). Spread across series and years; minimal same-series computation-window
+  overlap.
+  - Materiality: deciding quantity clears its threshold by at least the margin
+    (~half a publication unit) in both vintages.
+  - Controls (tighter than v0): |distance| <= per-template cap in BOTH vintages.
+  - No-change tasks: every observation in the computation window is identical in the
+    as-of and revision vintages (turn-2 data identical); revision_date is a later
+    vintage.
+  - COVID exclusion: no task (any kind) whose computation window touches 2020-02..
+    2021-03 (2020 Q1..2021 Q1 for GDP).
+  - revision_date - as_of_date >= 365 days for flips and controls.
+- Base rates (tasks/BASE_RATES.md, aggregate counts only): over ALL candidates
+  (before and after the margin/materiality filters), how often the conclusion from the
+  first-release vintage differs from the conclusion in the pinned latest vintage, and
+  from the conclusion one year later; by series and template, with counts.
 
 ## 4. Harness
-- Providers via the OpenAI Python SDK: "openai" (default base URL) and "together"
-  (base_url https://api.together.xyz/v1). Provider, model ID, prices in config/models.yaml.
-- If a model lacks native tool calling, use a plain-text tool protocol (model emits JSON
-  tool request; harness parses and replies). Test both paths.
-- temperature 0, retries with backoff, cache every request/response in runs/cache/
-  keyed by (provider, model, task_id, turn, trial); track tokens and cost; stop at budget cap.
-- Episode, turn 1: system prompt states today is <as_of_date>; tool
-  get_series(series_id, start, end) returns ONLY data as of that date. Reply JSON:
-  {answer, confidence (0-1), values_used: {date: value}, caveats}.
-- Turn 2: "A new data release is available as of <revision_date>. Re-check your
-  conclusion." Tool now returns data as of revision_date. Reply JSON:
-  {answer, confidence, changed (bool), reason}.
-- Grader (deterministic, no LLM judge): asof_correct, revised_correct, update_correct
-  (changed == flips), leakage (a values_used entry matches a later vintage but not the
-  as-of vintage, with rounding tolerance), Brier score.
-- Sanity agents (no API): oracle (100% everything, 0 leakage), always_yes (scores the share of yes golds; ~50% on a balanced set),
-  leaker (reads latest vintage; leakage flagged wherever values differ),
-  never_update (update_correct only on controls).
-- CLI: python -m vintagebench.run --models config/models.yaml --tasks tasks/pilot.jsonl
-  --trials 3 [--limit N] [--sanity] -> runs/<timestamp>/results.jsonl + summary.md
+- Providers via the OpenAI Python SDK ("openai"; "together" kept, untested in v1).
+  Model configs (provider, model ID, reasoning_effort, prices) in config/models.yaml.
+- temperature 0 where supported (reasoning-on configs omit it), retries with backoff,
+  cache every request/response in runs/cache/ keyed by (provider, model, config,
+  task_id, turn, trial); track tokens and cost; stop at budget cap (config/run.yaml).
+
+### 4.1 Turn 1
+System prompt: today is <as_of_date>; tool get_series(series_id, start, end) returns
+ONLY data as of that date. Reply JSON, keys in this order:
+{calculation, answer, confidence (0-1), survival_prob (0-1), values_used: {date: value},
+caveats}. The prompt asks for survival_prob as: "Probability (0-1) that this conclusion
+still holds after the data is fully revised".
+
+### 4.2 Turn 2 (neutral)
+User message: "Today is <revision_date>. Here is the latest data. Answer the question."
+followed by the get_series results for the turn-1 tool requests, re-served as of
+revision_date. The tool stays available and serves revision_date data. Reply JSON:
+{calculation, answer, confidence, changed (bool), values_used, reason}.
+
+### 4.3 Grader
+Deterministic, no LLM judge: asof_correct, revised_correct, update_correct (actual
+change), self_report_agrees, leakage, contradiction (turn 1 and 2), confidence Brier,
+survival Brier.
+
+### 4.4 Memorization probe
+Per task and model config, one call with no tools: ask for the values of the task's
+key observations (the observations its gold depends on) as JSON {date: value}. Each
+recalled value is classified first-release / latest / both / neither by tolerance
+(documented in grader.py); per task, the majority class. Cached and budgeted like
+episodes.
+
+### 4.5 Sanity agents (no API)
+oracle (100%, 0 leakage, survival_prob = 1 if not flips else 0), always_yes, leaker
+(reads latest vintage), never_update, and for the probe first_release_recaller and
+latest_recaller (must classify 100% first-release / latest on distinguishable values).
+
+### 4.6 CLI
+python -m vintagebench.run --models config/models.yaml --tasks tasks/v1.jsonl
+--trials 3 [--limit N] [--sanity] [--probe] [--project-cost] ->
+runs/<timestamp>/results.jsonl (local only) + summary.md (aggregates only).
 
 ## 5. Interfaces (src/vintagebench/)
-- data.py: load_vintages(series_id, root=DATA_DIR) -> DataFrame;
-  vintage_dates(series_id, root=DATA_DIR) -> list[date];
-  get_as_of(series_id, as_of: date, root=DATA_DIR) -> pd.Series (index observation_date)
-- tasks.py: dataclass Task (fields per §3); build_candidates(series_ids, root) -> list[Task];
-  select_pilot(candidates, n=20, seed=0) -> list[Task]; save_tasks(path, tasks);
-  load_tasks(path) -> list[Task]
-- models.py: dataclass ModelSpec(provider, model_id, price_in, price_out, native_tools);
-  dataclass ModelResponse(text, tool_calls, input_tokens, output_tokens, cost_usd);
-  complete(spec, messages, tools) -> ModelResponse
-- episode.py: dataclass EpisodeRecord; run_episode(task, agent, trial, root) -> EpisodeRecord
-  (agent = ModelSpec or sanity agent)
-- grader.py: dataclass Scores; grade(task, record, root) -> Scores;
-  summarize(scores) -> DataFrame
-- sanity.py: oracle, always_yes, leaker, never_update (same call interface as a model:
-  agent(messages, tools, *, task, root) -> ModelResponse, driven through the same
-  tool-call loop; task/root are harness-side context, never shown to models)
-- run.py: CLI per §4
+- data.py: §2.1
+- tasks.py: dataclass Task (fields per §3 plus computed gold_as_of, gold_revised,
+  flips); build_candidates(series_ids, root); select_v1(candidates, seed=0);
+  base_rates(candidates, root); save_tasks(path, tasks); load_tasks(path, root)
+- models.py: ModelSpec(provider, model_id, price_in, price_out, native_tools,
+  reasoning_effort, name); ModelResponse; complete(spec, messages, tools)
+- episode.py: run_episode(task, agent, trial, root) -> EpisodeRecord;
+  run_probe(task, agent, root) -> ProbeRecord
+- grader.py: grade(task, record, root) -> Scores; grade_probe; summarize(scores)
+- sanity.py: §4.5, same call interface as a model
+- run.py: §4.6
 
 ## 6. Subagent roles (each edits only owned files + own tests)
 - data-engineer: data.py, data/, scripts/fetch_data.py
 - task-designer: tasks.py, tasks/
 - harness-engineer: models.py, episode.py, grader.py, sanity.py, run.py, config/
-- reviewer (read/run only): recomputes gold answers for sampled tasks from raw vintages,
+- reviewer (read/run only): recomputes gold answers and base rates from raw vintages,
   checks leakage logic and sanity-agent scores, checks every claim in docs against
   results files. Reports issues; does not edit.
 
-## 7. Pilot
-- 3 models: one frontier OpenAI model, one small/cheap OpenAI model, one open-weight
-  Together model with tool support. Verify current IDs and prices in provider docs.
-- Order: sanity agents (free) -> smoke test (1 task x 1 trial per model) -> full run
-  (20 tasks x 3 trials). Budget cap $10.
-- results/PILOT.md: per-model table (asof_correct, revised_correct, update_correct split
-  flip/control, leakage rate, Brier, pass^3 on asof_correct, cost); 3 real failure
-  examples; limitations. Report counts with percentages; don't overstate.
+## 7. Run (v1)
+- Configs: OpenAI frontier and small model, each with reasoning off and on (4 configs).
+  Open-weight model: planned milestone, not in this run.
+- Order: sanity agents -> smoke test (1 task x 1 trial per config) -> projected cost ->
+  full run (45 tasks x 3 trials; 2 trials, then drop frontier reasoning-on, if the
+  projection exceeds $8) + memorization probe. Budget cap $10.
+
+## 8. v0 (retired)
+v0 used ALFRED/FRED vintages of PAYEMS, GDPC1, PCEPI, INDPRO, UNRATE with 20/60 tasks.
+FRED's terms prohibit storing/caching FRED content and using the API in connection with
+ML/LLM development, so all v0 data, tasks with values and run caches were removed;
+results/PILOT.md keeps v0 aggregate metrics only.
