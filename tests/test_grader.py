@@ -2,6 +2,7 @@
 contradictions (incl. the conclusion regex), probe classification and summaries."""
 
 import re
+from datetime import date
 
 import pytest
 from harness_fakes import CONTROL, FLIP, NO_CHANGE, install
@@ -279,3 +280,19 @@ def test_summary_markdown_has_counts_and_no_values():
     for value in ("101.1", "101.5", "100.7", "100.8"):
         assert value not in md
     assert grader.summary_markdown([]) == "No episodes."
+
+
+def test_rate_probe_references_and_unit(monkeypatch):
+    from vintagebench import episode
+
+    rate = episode.ProbeRate("mom_pct", "the month-over-month percent change of TOY", False)
+    monkeypatch.setitem(episode.PROBE_RATES, "TOY", rate)
+    june = date(2020, 6, 1)
+    first, latest = grader.probe_references("TOY", june, "mom_pct", ROOT)
+    assert first == pytest.approx(100 * (101.5 / 101.1 - 1))  # V1, first vintage with June
+    assert latest == pytest.approx(100 * (100.7 / 101.1 - 1))  # V3
+    prec = ProbeRecord(FLIP.id, "cfg", ["2020-06-01"], {"values": {"2020-06-01": 0.4}}, "mom_pct")
+    p = grader.grade_probe(FLIP, prec, ROOT)
+    assert p.counts["first_release"] == 1 and p.task_class == "first_release"  # 0.40 vs 0.396
+    prec2 = ProbeRecord(FLIP.id, "cfg", ["2020-06-01"], {"values": {"2020-06-01": 0.2}}, "mom_pct")
+    assert grader.grade_probe(FLIP, prec2, ROOT).task_class == "neither"  # 0.1 pp unit

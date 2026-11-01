@@ -23,8 +23,9 @@ Expected behaviour (checked by :func:`check_expectations`):
 - never_update: oracle on turn 1, then repeats its turn-1 reply (answer and values)
   with changed = false. update_correct and revised_correct exactly on non-flips.
 - probe agents first_release_recaller / latest_recaller answer the probe with the
-  first-release / latest value of each key observation: every distinguishable value
-  is classified first_release / latest.
+  first-release / latest reference of each probed quantity (levels, or the growth
+  rate for ROUTPUT / IPT; grader.probe_references): every distinguishable value is
+  classified first_release / latest.
 """
 
 from __future__ import annotations
@@ -34,9 +35,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vintagebench import data
 from vintagebench import tasks as tasks_mod
-from vintagebench.episode import day, iso
+from vintagebench.episode import as_of_series, day, iso, latest_value, probe_target
+from vintagebench.grader import probe_references
 from vintagebench.models import Message, ModelResponse, ToolSpec, iter_json_objects
 
 if TYPE_CHECKING:
@@ -190,7 +191,7 @@ class AlwaysYes(_Base):
 
 def latest_key_values(task: Task, root: Path) -> dict[str, float]:
     """Latest-vintage value of each key observation."""
-    return {d: float(data.latest_value(task.series_id, day(d), root)) for d in _key_dates(task)}
+    return {d: float(latest_value(task.series_id, d, root)) for d in _key_dates(task)}
 
 
 class Leaker(_Base):
@@ -248,28 +249,27 @@ class _Recaller:
 
     name = "recaller"
 
-    def value(self, task: Task, d: str, root: Path) -> float:
-        raise NotImplementedError
+    which = 0  # index into grader.probe_references: 0 first release, 1 latest
 
     def __call__(
         self, messages: list[Message], tools: list[ToolSpec], *, task: Task, root: Path
     ) -> ModelResponse:
-        values = {d: self.value(task, d, Path(root)) for d in _key_dates(task)}
+        quantity, dates = probe_target(task)
+        values = {
+            d: probe_references(task.series_id, day(d), quantity, Path(root))[self.which]
+            for d in dates
+        }
         return _reply(values=values)
 
 
 class FirstReleaseRecaller(_Recaller):
     name = "first_release_recaller"
-
-    def value(self, task: Task, d: str, root: Path) -> float:
-        return float(data.first_release(task.series_id, day(d), root)[0])
+    which = 0
 
 
 class LatestRecaller(_Recaller):
     name = "latest_recaller"
-
-    def value(self, task: Task, d: str, root: Path) -> float:
-        return float(data.latest_value(task.series_id, day(d), root))
+    which = 1
 
 
 oracle = Oracle()
@@ -289,7 +289,7 @@ PROBE_AGENTS: list[SanityAgent] = [first_release_recaller, latest_recaller]
 def latest_differs(task: Task, root: Path) -> bool:
     """True if some key observation's latest value differs from its as-of value (or
     was unpublished as of as_of_date): exactly where the leaker must be flagged."""
-    asof = data.get_as_of(task.series_id, day(task.as_of_date), root)
+    asof = as_of_series(task.series_id, task.as_of_date, root)
     known = {iso(d): float(v) for d, v in asof.items()}
     latest = latest_key_values(task, root)
     return any(d not in known or abs(known[d] - v) > 1e-9 for d, v in latest.items())

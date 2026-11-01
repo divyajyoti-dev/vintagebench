@@ -31,9 +31,12 @@ Episode rules (per episode = one task, config, trial):
   contradictions (they are parse failures).
 
 Probe rules (:func:`grade_probe`): each recalled value v for observation d is compared
-with f = first release and l = latest value (pinned last vintage) of d. Tolerance
-around a reference r: ``tol(r) = max(u, PROBE_REL_TOL * |r|)``, u = the series'
-rounding unit (publication precision, from data.SERIES). The full unit (not half)
+with f = first release and l = latest value (pinned last vintage) of d. For ROUTPUT and
+IPT the probed quantity is the task period's growth rate (episode.PROBE_RATES), with f
+computed within the first vintage containing the period and l within the latest
+vintage, and u = 0.1 pp. Tolerance around a reference r:
+``tol(r) = max(u, PROBE_REL_TOL * |r|)``, u = the series' rounding unit (publication
+precision, from data.SERIES) for levels. The full unit (not half)
 allows a recall that differs by one in the last published digit; the relative part
 (0.01%) absorbs float noise and recalls of levels to about 5 significant digits
 while staying well below typical level revisions (a 0.01% payroll level is about 15
@@ -63,7 +66,21 @@ import pandas as pd
 
 from vintagebench import data
 from vintagebench import tasks as tasks_mod
-from vintagebench.episode import EpisodeRecord, ProbeRecord, day, iso, series_meta
+from vintagebench.episode import (
+    PROBE_RATES,
+    RATE_ROUNDING_UNIT,
+    EpisodeRecord,
+    ProbeRecord,
+    as_of_series,
+    day,
+    first_release,
+    iso,
+    latest_series,
+    latest_value,
+    memo,
+    series_meta,
+    vintages,
+)
 
 if TYPE_CHECKING:
     from vintagebench.tasks import Task
@@ -265,14 +282,8 @@ def leaked(task: Task, values_used: Any, root: Path, as_of: Any = None) -> bool:
     if not isinstance(values_used, dict) or not values_used:
         return False
     cutoff = day(task.as_of_date if as_of is None else as_of)
-    asof_values = data.get_as_of(task.series_id, cutoff, root)
-    asof_by_date = {day(d): float(v) for d, v in asof_values.items() if pd.notna(v)}
-    vint = data.load_vintages(task.series_id, root)
-    later = vint[vint["vintage_date"].map(day) > cutoff]
-    later_by_date: dict[date, list[float]] = {}
-    for d, v in zip(later["observation_date"], later["value"], strict=True):
-        if pd.notna(v):
-            later_by_date.setdefault(day(d), []).append(float(v))
+    asof_by_date, later_by_date = memo(_leak_index, data.load_vintages, task.series_id,
+                                       str(root), cutoff)  # fmt: skip
     for key, raw in values_used.items():
         d, v = parse_obs_date(key), parse_number(raw)
         if d is None or v is None:
@@ -283,6 +294,21 @@ def leaked(task: Task, values_used: Any, root: Path, as_of: Any = None) -> bool:
         if any(_matches(v, x, tol) for x in later_by_date.get(d, [])):
             return True
     return False
+
+
+def _leak_index(
+    _loader: Any, series_id: str, root: str, cutoff: date
+) -> tuple[dict[date, float], dict[date, list[float]]]:
+    """({obs: value as of cutoff}, {obs: distinct values in vintages after cutoff})."""
+    asof_values = as_of_series(series_id, cutoff, root)
+    asof_by_date = {day(d): float(v) for d, v in asof_values.items() if pd.notna(v)}
+    vint = vintages(series_id, root)
+    later = vint[vint["vintage_date"].map(day) > cutoff]
+    later_by_date: dict[date, set[float]] = {}
+    for d, v in zip(later["observation_date"], later["value"], strict=True):
+        if pd.notna(v):
+            later_by_date.setdefault(day(d), set()).add(float(v))
+    return asof_by_date, {d: sorted(v) for d, v in later_by_date.items()}
 
 
 def implied(task: Task, values_used: Any) -> bool | None:
@@ -411,15 +437,32 @@ def task_majority(classes: list[tuple[str, bool]]) -> str:
     return top[0][0]
 
 
+def probe_references(series_id: str, d: date, quantity: str, root: Path) -> tuple[float, float]:
+    """(first-release, latest) reference for one probed observation.
+
+    Levels: data.first_release / data.latest_value. Rates: the PROBE_RATES quantity
+    for period d computed within the first vintage that contains d, and within the
+    latest vintage (same conventions as the tasks.py gold).
+    """
+    if quantity == "level":
+        return float(first_release(series_id, d, root)[0]), float(latest_value(series_id, d, root))
+    rate = PROBE_RATES[series_id]
+    first_vd = first_release(series_id, d, root)[1]
+    first = rate.compute(as_of_series(series_id, first_vd, root), d)
+    latest = rate.compute(latest_series(series_id, root), d)
+    if first is None or latest is None:
+        raise KeyError(f"{series_id}: {quantity} for {d} not computable")
+    return float(first), float(latest)
+
+
 def grade_probe(task: Task, record: ProbeRecord, root: Path) -> ProbeScores:
     """Classify each recalled key observation against first release and latest value."""
     root = Path(root)
     recalled = _recalled(record.reply)
-    unit = rounding_unit(task.series_id)
+    unit = RATE_ROUNDING_UNIT if record.quantity != "level" else rounding_unit(task.series_id)
     rows, classes = [], []
     for d in (day(x) for x in record.dates):
-        first = float(data.first_release(task.series_id, d, root)[0])
-        latest = float(data.latest_value(task.series_id, d, root))
+        first, latest = probe_references(task.series_id, d, record.quantity, root)
         tf, tl = probe_tolerance(unit, first), probe_tolerance(unit, latest)
         distinguishable = abs(first - latest) > max(tf, tl) + 1e-12
         v = recalled.get(d)
