@@ -1,7 +1,8 @@
 # VintageBench
 
 A benchmark testing whether AI analysts reason correctly about provisional data that is
-later revised. Uses US economic data vintages from ALFRED (St. Louis Fed).
+later revised. Uses US macroeconomic data vintages from the Philadelphia Fed Real-Time
+Data Set for Macroeconomists (RTDSM). No FRED/ALFRED data or API anywhere.
 
 ## Read first
 - docs/SPEC.md is the source of truth for interfaces, tasks and metrics. If you must
@@ -17,7 +18,7 @@ later revised. Uses US economic data vintages from ALFRED (St. Louis Fed).
 - Work on a branch; one PR per session; never push to main.
 
 ## Secrets and cost
-- Read FRED_API_KEY, OPENAI_API_KEY, TOGETHER_API_KEY from env. Never print, log or
+- Read OPENAI_API_KEY, TOGETHER_API_KEY from env. Never print, log or
   commit them.
 - Tests never call the network; use fixtures and mocks.
 - Paid model calls only via `python -m vintagebench.run`, which enforces the budget cap
@@ -25,8 +26,9 @@ later revised. Uses US economic data vintages from ALFRED (St. Louis Fed).
 
 ## Code
 - Python 3.11, src layout, type hints, small functions, pytest, ruff.
-- Cache downloaded data (data/vintages/, committed) and model responses (runs/cache/);
-  reruns must be free.
+- Cache downloaded data (data/raw/) and model responses (runs/cache/) locally; reruns
+  must be free. Neither is committed: RTDSM redistribution is not clearly permitted
+  (data/NOTICE.md), so commit no raw data values, only aggregate metrics.
 - Every function that computes a gold answer has a unit test.
 - Subagents edit only the files they own (SPEC §6) plus their own tests.
 
