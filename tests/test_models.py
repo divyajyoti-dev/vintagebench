@@ -324,9 +324,9 @@ def test_repo_models_yaml_is_the_v1_config():
     specs = models.load_model_specs(Path(__file__).parents[1] / "config" / "models.yaml")
     assert [(s.name, s.model_id, s.reasoning_effort) for s in specs] == [
         ("gpt-6-sol/reasoning-off", "gpt-6-sol", "none"),
-        ("gpt-6-sol/reasoning-low", "gpt-6-sol", "low"),
+        ("gpt-6-sol/reasoning-medium", "gpt-6-sol", "medium"),
         ("gpt-6-luna/reasoning-off", "gpt-6-luna", "none"),
-        ("gpt-6-luna/reasoning-low", "gpt-6-luna", "low"),
+        ("gpt-6-luna/reasoning-medium", "gpt-6-luna", "medium"),
     ]
     assert all(s.provider == "openai" and not s.native_tools for s in specs)
     assert [s.max_tokens for s in specs] == [None, 8192, None, 8192]

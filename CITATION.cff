@@ -6,8 +6,8 @@ type: software
 title: VintageBench
 abstract: >-
   A benchmark testing whether AI analysts reason correctly about provisional
-  data that is later revised, using US economic data vintages from ALFRED
-  (Federal Reserve Bank of St. Louis) as the first test bed.
+  data that is later revised, using US macroeconomic data vintages from the
+  Real-Time Data Set for Macroeconomists (Federal Reserve Bank of Philadelphia).
 authors:
   - family-names: Jyoti
     given-names: Divya
@@ -20,5 +20,5 @@ keywords:
   - large language models
   - data revisions
   - real-time data
-  - ALFRED
+  - RTDSM
   - economic data
