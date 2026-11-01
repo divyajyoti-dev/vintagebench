@@ -99,9 +99,15 @@ Can an AI analyst reason correctly about provisional data that later gets revise
 ## 4. Harness
 - Providers via the OpenAI Python SDK ("openai"; "together" kept, untested in v1).
   Model configs (provider, model ID, reasoning_effort, prices) in config/models.yaml.
+- GPT-6 models allow Chat Completions function calling only with reasoning_effort
+  "none", so all v1 configs use the plain-text JSON tool protocol (native_tools false)
+  so that reasoning off/on are compared under one protocol.
 - temperature 0 where supported (reasoning-on configs omit it), retries with backoff,
   cache every request/response in runs/cache/ keyed by (provider, model, config,
   task_id, turn, trial); track tokens and cost; stop at budget cap (config/run.yaml).
+  The cap is cumulative across runs (ledger runs/cache/spend_ledger.json). Before any
+  paid run the sanity agents run in memory on the same tasks; any missed expectation
+  exits with code 4 and no API call.
 
 ### 4.1 Turn 1
 System prompt: today is <as_of_date>; tool get_series(series_id, start, end) returns
@@ -113,19 +119,26 @@ still holds after the data is fully revised".
 ### 4.2 Turn 2 (neutral)
 User message: "Today is <revision_date>. Here is the latest data. Answer the question."
 followed by the get_series results for the turn-1 tool requests, re-served as of
-revision_date. The tool stays available and serves revision_date data. Reply JSON:
+revision_date (deduplicated; if turn 1 made no successful request, only the sentence
+is sent). The tool stays available and serves revision_date data. Reply JSON:
 {calculation, answer, confidence, changed (bool), values_used, reason}.
 
 ### 4.3 Grader
 Deterministic, no LLM judge: asof_correct, revised_correct, update_correct (actual
-change), self_report_agrees, leakage, contradiction (turn 1 and 2), confidence Brier,
-survival Brier.
+change), self_report_agrees, leakage per turn (a value matching a vintage after that
+turn's date but not the vintage as of it), contradiction per turn, confidence Brier,
+survival Brier. Missing or out-of-range probabilities are excluded from Briers and
+counted as missing.
 
 ### 4.4 Memorization probe
 Per task and model config, one call with no tools: ask for the values of the task's
 key observations (the observations its gold depends on) as JSON {date: value}. Each
-recalled value is classified first-release / latest / both / neither by tolerance
-(documented in grader.py); per task, the majority class. Cached and budgeted like
+recalled value is classified by tolerance tol = max(rounding unit, 1e-4 x |ref|):
+"both" if first release and latest are indistinguishable and the recall matches,
+otherwise first_release / latest (nearer if both) / neither; null = no_answer. Per task,
+the majority over distinguishable observations ("mixed" on a tie). ROUTPUT and IPT are
+probed on the deciding growth rate rather than levels, because their base year changes
+across vintages. Cached and budgeted like
 episodes.
 
 ### 4.5 Sanity agents (no API)
