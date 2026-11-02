@@ -39,14 +39,16 @@ highest template rate is payroll 3-month average above 150k: 23/116 (19.8%).
 
 So roughly 1 in 10 yes/no conclusions drawn from first-release data comes out
 differently on the latest data. The task set over-samples flips (20/45) by design, so
-survival on the tasks (75/135 episodes per config) is not the population rate.
+survival on the tasks (75/135 episodes in 3 configs, 74/135 in `gpt-6-luna` / medium)
+is not the population rate.
 
 ## 3. survival_prob calibration
 
 Turn 1 asks for the "probability (0-1) that this conclusion still holds after the data
-is fully revised". survived = (turn-1 answer == gold on the revision vintage). AUC is
-the probability that a random non-flip episode gets a higher survival_prob than a
-random flip episode (0.5 = no discrimination).
+is fully revised". survived = (turn-1 answer == gold on the revision vintage). AUC (flip vs
+non-flip) is the probability that a random non-flip episode gets a higher survival_prob
+than a random flip episode, ties counting half (0.5 = no discrimination). Ties are
+common because many replies use 0.95 or 0.99.
 
 | Config | Mean survival_prob, flips | Mean survival_prob, non-flips | AUC | Flip episodes with survival_prob ≥ 0.8 | Survival Brier |
 |---|---|---|---|---|---|
@@ -68,8 +70,10 @@ random flip episode (0.5 = no discrimination).
 - **Series-level priors partly track the base rates.** PCPI, the lowest-revision
   series in §2, gets mean survival_prob 0.94–0.97, the highest in 3 of 4 configs. But RUC gets
   0.91–0.98, although its first-release conclusions flip in 17/115 (14.8%) instances.
-- **Reasoning on did not improve calibration.** AUC fell from 0.61 to 0.58
-  (`gpt-6-sol`) and from 0.64 to 0.60 (`gpt-6-luna`).
+- **Reasoning on did not improve discrimination.** AUC went from 0.61 to 0.58
+  (`gpt-6-sol`) and from 0.64 to 0.60 (`gpt-6-luna`); differences this size are within
+  noise at n = 60/75 with many ties. Survival Brier improved for `gpt-6-luna`
+  (0.424 → 0.374) and was flat for `gpt-6-sol` (0.339 → 0.343).
 
 ## 4. Memorization probe (no tools)
 
@@ -117,14 +121,16 @@ SPEC §4.5 expectation:
 - never_update: correct only on non-flips;
 - probe recallers: 81/81 distinguishable values classified correctly.
 
-- **`gpt-6-sol` is at ceiling with reasoning off and on.** At temperature 0 its outcome
+- **`gpt-6-sol` is at ceiling with reasoning off and on.** In both configs its outcome
   never varied across trials. The v1 task set does not separate it from the oracle on
   accuracy. It separates it only on survival_prob (§3).
-- **`gpt-6-luna` with reasoning off mostly fails at data gathering.** 19 of its 26
-  wrong turn-1 answers say the data needed were not returned. Typically it asked for
-  too short a window, e.g. without the prior quarter. In 18 of those 19 it then
-  answered "no" by default. Reasoning on fixes almost all of this: 26 → 2 wrong turn-1
-  answers.
+- **`gpt-6-luna` with reasoning off mostly fails at data gathering.** 20 of its 26
+  wrong turn-1 answers say the data needed were not returned. In 15 of those 20 it had
+  asked for too short a window, e.g. without the prior quarter; in 5 it made no
+  request. 19 of the 20 answered "no", 14 of them without any calculation. The other 6
+  wrong answers are window-convention errors (e.g. averaging two monthly changes for a
+  three-month average). With reasoning on, wrong turn-1 answers fell from 26 to 2, and
+  both of the 2 are reply parse failures.
 - **Missed updates follow from turn 1.** `gpt-6-luna` / off missed 19 of 60 flip
   updates. In 13 of them the turn-1 answer was wrong and the turn-2 answer, the same
   label, was right. In 16 of the 19 its turn-1 reply says data needed were not
@@ -136,22 +142,23 @@ SPEC §4.5 expectation:
 |---|---|---|---|---|---|
 | gpt-6-sol / off | 0/135 | 0/135 | 0 / 0 | 135/135 | 0 / 0 |
 | gpt-6-sol / medium | 0/135 | 0/135 | 0 / 0 | 135/135 | 0 / 0 |
-| gpt-6-luna / off | 0/135 | 1/135 | 0 / 0 | 135/135 | 0 / 0 |
+| gpt-6-luna / off | 0/135 | 0/135 | 0 / 0 | 135/135 | 0 / 0 |
 | gpt-6-luna / medium | 0/135 | 0/135 | 0 / 0 | 133/133 | 2 / 1 |
 
-With `calculation` placed before `answer`, label/text contradictions all but vanished:
-1 of 1080 turns. In v0, where the reply put `answer` first, label slips were the main
+With `calculation` placed before `answer`, label/text contradictions vanished: 0 of
+1080 turns. The grader first flagged 1, a false positive: a reply that ended "This
+differs from my previous answer of no." The regex was then fixed and the run
+re-graded from cache. In v0, where the reply put `answer` first, label slips were the main
 error source (§9). This is a before/after comparison on different tasks and data, so
 it is suggestive, not a controlled test.
 
 ## 7. Failure examples
 
-Numbers in quotes are redacted as [value] (SPEC §2.3). Questions are verbatim from
-`tasks/v1.jsonl`.
+Numbers in quotes (including dates) are redacted as [value] (SPEC §2.3).
 
 1. **`gpt-6-luna` / off, `routput-gdp_shrink-2022q2` (flip; as-of Yes, revised No),
    all 3 trials.** It requested 2022 Q2–Q3 instead of Q1–Q2. Turn 1: *"…the returned
-   data contain no [value] Q[value] observation. Without the prior quarter's value, I
+   data contain no [value] Q[value] observation. Without the prior quarter’s value, I
    cannot determine whether GDP shrank in Q[value]"*. It answered "no" with
    survival_prob 0.99. In turn 2 it again answered "no", so it is marked
    revised_correct but missed the update. It is right on the revised data by default,
@@ -171,8 +178,7 @@ Numbers in quotes are redacted as [value] (SPEC §2.3). Questions are verbatim f
 
 ## 8. Limitations
 
-- **Small n.** 45 tasks × 3 trials. At temperature 0 the trials are nearly
-  deterministic (`gpt-6-sol`: no task varied; `gpt-6-luna`: 8 tasks off, 2 tasks on),
+- **Small n.** 45 tasks × 3 trials. The trials are nearly deterministic (`gpt-6-sol`: no task varied; `gpt-6-luna`: 8 tasks off, 2 tasks on),
   so the effective sample is closer to 45 tasks. No confidence intervals are reported.
   One task is 3 episodes, about 5 points of a flip or control metric.
 - **The flip pool is thin.** 82 flip-eligible candidates after the filters (12 IPT, 7
@@ -180,7 +186,7 @@ Numbers in quotes are redacted as [value] (SPEC §2.3). Questions are verbatim f
   the smallest possible revision.
 - **Ceiling on accuracy.** The frontier model makes no accuracy errors. Without
   formula-spelled questions the set still mostly tests data gathering and arithmetic,
-  and separates models only on calibration (§3).
+  and it separates the frontier model from the oracle only on survival_prob (§3).
 - **Survival outcome definition.** survived is scored against the pinned latest vintage
   (September/October 2026), which is not final for recent periods.
 - **Vintage dates.** EMPLOY, IPT and PCPI vintages are dated at month end, a
@@ -195,8 +201,8 @@ Numbers in quotes are redacted as [value] (SPEC §2.3). Questions are verbatim f
 - **Prices** come from OpenAI's model pages as fetched on 2026-11-01. Token counts are
   measured.
 - **Data not redistributed.** Per-episode results and the response cache contain data
-  values and are not committed. The reviewer recomputed these numbers locally from
-  `results.jsonl`.
+  values and are not committed. An independent review recomputed every number here
+  locally from `results.jsonl`.
 
 ## 9. v0 (retired prototype on ALFRED; aggregate metrics only)
 
