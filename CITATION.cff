@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: >-
+  If you use VintageBench, please cite it as below. Please also cite the data
+  sources listed in data/NOTICE.md.
+type: software
+title: VintageBench
+abstract: >-
+  A benchmark testing whether AI analysts reason correctly about provisional
+  data that is later revised, using US macroeconomic data vintages from the
+  Real-Time Data Set for Macroeconomists (Federal Reserve Bank of Philadelphia).
+authors:
+  - family-names: Jyoti
+    given-names: Divya
+version: 0.0.1
+repository-code: "https://github.com/divyajyoti-dev/vintagebench"
+url: "https://github.com/divyajyoti-dev/vintagebench"
+license: MIT
+keywords:
+  - benchmark
+  - large language models
+  - data revisions
+  - real-time data
+  - RTDSM
+  - economic data

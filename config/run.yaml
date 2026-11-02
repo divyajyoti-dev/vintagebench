@@ -1,0 +1,12 @@
+# Run settings for `python -m vintagebench.run` (SPEC §4, §7).
+budget_usd: 10        # hard cap, cumulative over runs sharing runs/cache (spend ledger);
+                      # the run stops before a call that could exceed it
+trials: 3             # default when --trials is not given
+temperature: 0        # sent only to reasoning-off configs (OpenAI rejects it otherwise)
+max_tokens: 2048      # default max output tokens per call; models.yaml may override
+# SPEC §7 plan: if the projected full run exceeds the threshold, run 2 trials and drop
+# the frontier reasoning-on config (--project-cost prints both plans).
+projection_threshold_usd: 8
+fallback_trials: 2
+fallback_drop:
+  - gpt-6-sol/reasoning-medium

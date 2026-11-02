@@ -1,0 +1,67 @@
+# v1 model configs (SPEC §4, §7): OpenAI frontier (gpt-6-sol) and small (gpt-6-luna)
+# model, each with reasoning off ("none") and on ("medium"; "low" was smoke-tested first and used almost no reasoning tokens).
+# Fields map to ModelSpec (SPEC §5); unknown keys are rejected.
+#   name: config name used in cache keys, results and summary
+#   max_tokens: per-config max output tokens (overrides config/run.yaml); reasoning
+#     tokens are billed and counted as output, so reasoning-on configs get 8192.
+#
+# Model IDs: confirmed 2026-11-01 with the free models.list() call (gpt-6-sol and
+# gpt-6-luna are listed; gpt-6.1-sol also exists but is not used in this run).
+# Prices: USD per 1M tokens, Standard tier, checked 2026-11-01 on
+#   https://developers.openai.com/api/docs/pricing (gpt-6-luna row) and the model pages
+#   https://developers.openai.com/api/docs/models/gpt-6-sol  ($2.00 in, $0.20 cached in,
+#     $2.50 cache writes, $10.00 out)
+#   https://developers.openai.com/api/docs/models/gpt-6-luna ($0.10 in, $0.01 cached in,
+#     $0.125 cache writes, $0.50 out)
+#
+# API constraints (developers.openai.com/api/docs/guides/latest-model and the model
+# pages, checked 2026-11-01): GPT-6 Sol/Luna support function calling in Chat
+# Completions only with reasoning_effort "none"; with any other effort, temperature,
+# top_p and logprobs must be omitted. The harness therefore omits temperature for
+# reasoning-on configs, and all four configs use the plain-text JSON tool protocol
+# (native_tools: false) so that reasoning off vs on is compared under the same tool
+# protocol. (Setting native_tools: true is allowed only with reasoning_effort none.)
+#
+# Open-weight model (provider "together"): a planned milestone, not in this run.
+
+- name: gpt-6-sol/reasoning-off
+  provider: openai
+  model_id: gpt-6-sol
+  reasoning_effort: none
+  native_tools: false
+  price_in: 2.00
+  price_cached_in: 0.20
+  price_cache_write: 2.50
+  price_out: 10.00
+
+- name: gpt-6-sol/reasoning-medium
+  provider: openai
+  model_id: gpt-6-sol
+  reasoning_effort: medium
+  native_tools: false
+  max_tokens: 8192
+  price_in: 2.00
+  price_cached_in: 0.20
+  price_cache_write: 2.50
+  price_out: 10.00
+
+- name: gpt-6-luna/reasoning-off
+  provider: openai
+  model_id: gpt-6-luna
+  reasoning_effort: none
+  native_tools: false
+  price_in: 0.10
+  price_cached_in: 0.01
+  price_cache_write: 0.125
+  price_out: 0.50
+
+- name: gpt-6-luna/reasoning-medium
+  provider: openai
+  model_id: gpt-6-luna
+  reasoning_effort: medium
+  native_tools: false
+  max_tokens: 8192
+  price_in: 0.10
+  price_cached_in: 0.01
+  price_cache_write: 0.125
+  price_out: 0.50

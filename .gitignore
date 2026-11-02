@@ -1,0 +1,10 @@
+.env
+.venv
+__pycache__
+.ruff_cache
+*.egg-info
+# RTDSM data are not redistributed (data/NOTICE.md): fetch locally
+data/raw/
+# per-episode results and caches contain data values: local only
+runs/*
+!runs/README.md
