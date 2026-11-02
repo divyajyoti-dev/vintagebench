@@ -370,3 +370,24 @@ def test_turn_texts_and_raw_tokens_from_transcript():
     a, b = grader.turn_texts(r)
     assert grader.raw_values_used(a) == {"2020-06-01": "101.50"}
     assert grader.raw_values_used(b) == {"2020-06-01": "100.80"}
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # reviewer case: final word refers to the earlier answer
+        ("June is above May, so it rose. This differs from my previous answer of no.", None),
+        ("So the answer is yes. This differs from my previous answer of no.", True),
+        ("Therefore, yes. My prior answer was no.", True),
+        ("The earlier answer: yes; on the revised data the answer is no.", False),
+        ("I changed my answer from no to yes.", True),  # "to yes" is the new answer
+        ("Changed from yes; the answer is no", False),
+        ("My original conclusion (no) still holds, so no.", False),
+        # explicit patterns beat a later final word
+        ("The answer is yes. Nothing else to add, no", True),
+        # final word still used when nothing explicit
+        ("It fell by a small amount. Yes", True),
+    ],
+)
+def test_final_conclusion_ignores_prior_answer_references(text, expected):
+    assert grader.final_conclusion(text) is expected

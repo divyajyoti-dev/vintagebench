@@ -20,7 +20,9 @@ Can an AI analyst reason correctly about provisional data that later gets revise
   model's own reported values_used (gold function applied to them; skipped and counted
   when the values are off the series' scale, e.g. growth rates instead of levels), or
   with an explicit
-  final conclusion in `calculation` (regex: "answer is yes/no", "so yes/no", etc.)
+  final conclusion in `calculation` (the last explicit pattern such as "answer is
+  yes/no" or "so yes/no"; a final yes/no word only when none; yes/no referring to an
+  earlier answer or to alternatives is ignored)
 - memorization probe (§4.4): share of recalled key observations matching the first
   release, the latest vintage, both (indistinguishable), or neither
 
