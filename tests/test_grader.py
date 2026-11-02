@@ -172,17 +172,21 @@ def test_classify_recall_rules():
     c = grader.classify_recall
     assert c(None, 101.5, 100.7, 0.1) == "no_answer"
     assert c(101.5, 101.5, 100.7, 0.1) == "first_release"
-    assert c(101.45, 101.5, 100.7, 0.1) == "first_release"  # within one unit
+    assert c(101.45, 101.5, 100.7, 0.1) == "first_release"  # half a unit
+    assert c(101.44, 101.5, 100.7, 0.1) == "neither"  # more than half a unit
     assert c(100.7, 101.5, 100.7, 0.1) == "latest"
     assert c(101.1, 101.5, 100.7, 0.1) == "neither"
     assert c(101.1, 101.1, 101.1, 0.1) == "both"
     assert c(105.0, 101.1, 101.1, 0.1) == "neither"
-    assert c(100.05, 100.0, 100.15, 0.1) == "first_release"  # within both: nearer wins
-    assert c(100.12, 100.0, 100.15, 0.1) == "latest"
-    # relative part: unit 1, level 150000 -> tolerance 15
-    assert c(150_010, 150_000, 150_100, 1.0) == "first_release"
-    assert grader.probe_tolerance(1.0, 150_000) == pytest.approx(15.0)
-    assert grader.probe_tolerance(0.1, 4.0) == 0.1
+    # a one-unit revision (e.g. RUC 4.0 -> 4.1) is distinguishable
+    assert grader.distinguishable(4.0, 4.1, 0.1)
+    assert c(4.0, 4.0, 4.1, 0.1) == "first_release" and c(4.1, 4.0, 4.1, 0.1) == "latest"
+    assert c(4.05, 4.0, 4.1, 0.1) == "first_release"  # halfway: within both, tie -> first
+    assert not grader.distinguishable(4.1, 4.1 + 1e-12, 0.1)
+    assert c(150_000, 150_000, 150_001, 1.0) == "first_release"  # EMPLOY: 1 thousand unit
+    assert grader.probe_tolerance(0.1) == pytest.approx(0.05)
+    assert grader.round_to_unit(0.35, 0.1) == 0.4 and grader.round_to_unit(-0.3956, 0.1) == -0.4
+    assert grader.round_to_unit(2.149, 0.1) == 2.1 and grader.round_to_unit(7.0, 1.0) == 7.0
 
 
 def test_grade_probe_majority_and_relative_errors():
@@ -289,10 +293,80 @@ def test_rate_probe_references_and_unit(monkeypatch):
     monkeypatch.setitem(episode.PROBE_RATES, "TOY", rate)
     june = date(2020, 6, 1)
     first, latest = grader.probe_references("TOY", june, "mom_pct", ROOT)
-    assert first == pytest.approx(100 * (101.5 / 101.1 - 1))  # V1, first vintage with June
-    assert latest == pytest.approx(100 * (100.7 / 101.1 - 1))  # V3
-    prec = ProbeRecord(FLIP.id, "cfg", ["2020-06-01"], {"values": {"2020-06-01": 0.4}}, "mom_pct")
-    p = grader.grade_probe(FLIP, prec, ROOT)
-    assert p.counts["first_release"] == 1 and p.task_class == "first_release"  # 0.40 vs 0.396
-    prec2 = ProbeRecord(FLIP.id, "cfg", ["2020-06-01"], {"values": {"2020-06-01": 0.2}}, "mom_pct")
-    assert grader.grade_probe(FLIP, prec2, ROOT).task_class == "neither"  # 0.1 pp unit
+    # V1 (first vintage with June): +0.396 -> 0.4; V3 (latest): -0.396 -> -0.4 (0.1 pp)
+    assert (first, latest) == (0.4, -0.4)
+
+    def probe(v):
+        return ProbeRecord(FLIP.id, "cfg", ["2020-06-01"], {"values": {"2020-06-01": v}}, "mom_pct")
+
+    assert grader.grade_probe(FLIP, probe(0.4), ROOT).task_class == "first_release"
+    assert grader.grade_probe(FLIP, probe(0.44), ROOT).task_class == "first_release"
+    assert grader.grade_probe(FLIP, probe(0.3), ROOT).task_class == "neither"
+    assert grader.grade_probe(FLIP, probe(-0.4), ROOT).task_class == "latest"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The answer is yes or no depending on rounding.",
+        "The answer is yes/no depending on rounding",
+        "Conclusion: no or yes, unclear",
+        "Hard to say: yes or no",
+        "It depends: yes/no",
+    ],
+)
+def test_final_conclusion_ignores_alternatives(text):
+    assert grader.final_conclusion(text) is None
+
+
+def test_numbers_check_skipped_when_values_off_scale():
+    rates = {"2020-05-01": -0.3, "2020-06-01": 0.4}  # growth rates, not levels
+    s = grader.grade(FLIP, rec(t1("yes", values=rates), t2("yes", True, values=rates)), ROOT)
+    assert s.numbers_check_skipped_t1 and s.numbers_check_skipped_t2
+    assert not s.contradiction_numbers_t1 and not s.contradiction_numbers_t2
+    levels = {"2020-05-01": 101.1, "2020-06-01": 101.5}
+    s = grader.grade(FLIP, rec(t1("yes", values=levels), t2("yes", True)), ROOT)
+    assert not s.numbers_check_skipped_t1 and s.contradiction_numbers_t1
+    assert not s.numbers_check_skipped_t2  # empty values: nothing to skip
+    assert grader.on_scale(FLIP, {"2020-06-01": 50.0}, ROOT, "2021-01-15")  # within 3x
+    assert not grader.on_scale(FLIP, {"2020-06-01": 30.0}, ROOT, "2021-01-15")
+    assert not grader.on_scale(FLIP, {"2030-01-01": 101.0}, ROOT, "2021-01-15")  # no ref
+    md = grader.summary_markdown(
+        [grader.grade(FLIP, rec(t1("yes", values=rates), t2("no", False)), ROOT)]
+    )
+    assert "Numbers check skipped" in md and "| 1/1 (100%) | 0/1 (0%) |" in md
+
+
+def test_leakage_decimals_from_raw_reply_tokens(monkeypatch):
+    from harness_fakes import SERIES
+
+    # a 3-decimal series: as-of 101.110, later vintage 101.115
+    monkeypatch.setitem(SERIES, "TOY", {**SERIES["TOY"], "rounding_unit": 0.001})
+    index = ({date(2020, 6, 1): 101.11}, {date(2020, 6, 1): [101.115]})  # as-of, later
+    monkeypatch.setattr(grader, "memo", lambda fn, *a: index)
+    text = '{"answer": "no", "values_used": {"2020-06-01": 101.110}}'
+    tokens = grader.raw_values_used(text)
+    assert tokens == {"2020-06-01": "101.110"}
+    # parsed float 101.11 alone has 2 decimals: tolerance 0.005 would also match 101.115
+    assert grader.reported_decimals(101.11, "101.110", "TOY") == 3
+    assert grader.reported_decimals(101.11, None, "TOY") == 3  # series-decimals floor
+    assert grader.reported_decimals("101.11", None, "TOY") == 2  # string value kept as is
+    assert not grader.leaked(FLIP, {"2020-06-01": 101.11}, ROOT, tokens=tokens)
+    assert grader.leaked(FLIP, {"2020-06-01": 101.115}, ROOT)
+
+
+def test_turn_texts_and_raw_tokens_from_transcript():
+    transcript = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": '{"answer": "no", "values_used": {"2020-06-01": 101.50}}'},
+        {"role": "user", "content": "Today is ..."},
+        {
+            "role": "assistant",
+            "content": '{"answer": "yes", "values_used": {"2020-06-01": 100.80}}',
+        },
+    ]
+    r = EpisodeRecord(FLIP.id, "a", 1, {}, {}, transcript=transcript)
+    a, b = grader.turn_texts(r)
+    assert grader.raw_values_used(a) == {"2020-06-01": "101.50"}
+    assert grader.raw_values_used(b) == {"2020-06-01": "100.80"}

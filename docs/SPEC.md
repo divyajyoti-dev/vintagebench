@@ -17,7 +17,9 @@ Can an AI analyst reason correctly about provisional data that later gets revise
 - leakage: a values_used entry matches a later vintage but not the as-of vintage
   (rounding tolerance)
 - label/text contradiction: the answer label disagrees with the answer implied by the
-  model's own reported values_used (gold function applied to them), or with an explicit
+  model's own reported values_used (gold function applied to them; skipped and counted
+  when the values are off the series' scale, e.g. growth rates instead of levels), or
+  with an explicit
   final conclusion in `calculation` (regex: "answer is yes/no", "so yes/no", etc.)
 - memorization probe (§4.4): share of recalled key observations matching the first
   release, the latest vintage, both (indistinguishable), or neither
@@ -140,10 +142,11 @@ counted as missing.
 ### 4.4 Memorization probe
 Per task and model config, one call with no tools: ask for the values of the task's
 key observations (the observations its gold depends on) as JSON {date: value}. Each
-recalled value is classified by tolerance tol = max(rounding unit, 1e-4 x |ref|):
-"both" if first release and latest are indistinguishable and the recall matches,
-otherwise first_release / latest (nearer if both) / neither; null = no_answer. Per task,
-the majority over distinguishable observations ("mixed" on a tie). ROUTPUT and IPT are
+recalled value is classified against f (first release) and l (latest pinned vintage)
+with tol = u/2 (u = published rounding unit; 0.1 pp for growth rates, with f and l
+rounded to 0.1 pp): "both" if |f - l| <= tol and the recall matches, otherwise
+first_release / latest (nearer if both) / neither; null = no_answer. Per task, the
+majority over distinguishable observations ("mixed" on a tie). ROUTPUT and IPT are
 probed on the deciding growth rate rather than levels, because their base year changes
 across vintages. Cached and budgeted like
 episodes.

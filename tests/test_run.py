@@ -175,6 +175,8 @@ def test_model_run_with_probe(tmp_path, monkeypatch):
     assert ep["changed"] is False and ep["self_report_agrees"] is True
     summary = (d / "summary.md").read_text()
     assert "| fake/low | fake | no (omitted) | low | 500 | plain-text JSON | 1 / 1 |" in summary
+    settings = summary.split("## Model settings")[1].split("##")[0]
+    assert settings.count("| fake/low |") == settings.count("| fake/off |") == 1
     assert "| fake/off | 1 | 1/1 (100%) | 0/1 (0%) | 0/1 (0%) | 0/1 (0%) | n/a | n/a" in summary
     assert "## Memorization probe" in summary
     for value in ("101.1", "101.5", "100.8"):

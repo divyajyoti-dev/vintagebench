@@ -119,6 +119,8 @@ def _rate(n: int, d: int) -> str:
 
 def settings_markdown(agents: list[Agent], cfg: dict[str, Any]) -> str:
     """Effective request settings per config."""
+    unique = {a.name: a for a in agents}  # probe agents may repeat episode agents
+    agents = list(unique.values())
     lines = [
         "| Config | Model ID | temperature sent | reasoning_effort | max output tokens "
         "| tool protocol | price in / out (USD per 1M) |",
