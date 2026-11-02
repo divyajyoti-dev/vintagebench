@@ -254,22 +254,52 @@ CONCLUSION_PATTERNS = (
 )
 
 
+# References to an earlier answer, e.g. "my previous answer of no", "changed from yes":
+# their yes/no is masked before matching (it is not this turn's conclusion).
+PRIOR_ANSWER_PATTERNS = (
+    re.compile(
+        r"\b(?:previous|prior|earlier|original|initial|old|first|last)\s+"
+        r"(?:turn[- ]?1\s+)?(?:answer|conclusion|response|reply)\s*"
+        rf"(?:\(|of|was|is|:|=|-|—)?\s*{_Q}(yes|no)\b",
+        re.I,
+    ),
+    re.compile(
+        rf"\b(?:chang(?:e|ed|ing)|switch(?:ed|ing)?|revis(?:e|ed|ing)|flip(?:ped|ping)?)\s+"
+        rf"(?:(?:my|the)\s+(?:answer|conclusion)\s+)?from\s+{_Q}(yes|no)\b",
+        re.I,
+    ),
+)
+
+
+def _mask_prior_answers(text: str) -> str:
+    for pat in PRIOR_ANSWER_PATTERNS:
+        text = pat.sub(lambda m: m.group(0)[: m.start(1) - m.start(0)] + "___", text)
+    return text
+
+
 def final_conclusion(text: Any) -> bool | None:
     """The last explicit yes/no conclusion in ``text`` (True = yes), or None.
 
-    Recognised: "answer is/: yes|no", "conclusion: yes|no", "so/therefore/thus/hence
-    yes|no" and "->/→/=> yes|no" when yes/no ends the clause, and a final word yes/no.
-    A yes/no followed by "or" or "/" (or a final "no" preceded by "or " or "/") is not
-    a conclusion: "yes or no", "yes/no", "the answer is yes or no depending ...".
-    "no decline" is not a conclusion either.
+    Explicit patterns: "answer is/: yes|no", "conclusion: yes|no", "so/therefore/thus/
+    hence yes|no" and "->/→/=> yes|no" when yes/no ends the clause; the last match
+    wins. Only if none matches is a final word yes/no used. A yes/no followed by "or"
+    or "/" (or a final "no" preceded by "or " or "/") is not a conclusion ("yes or no",
+    "yes/no", "the answer is yes or no depending ..."), nor is "no decline". A yes/no
+    referring to an earlier answer ("my previous answer of no", "changed from yes") is
+    masked first and never counts.
     """
     if not isinstance(text, str) or not text:
         return None
+    text = _mask_prior_answers(text)
+    *explicit, final_word = CONCLUSION_PATTERNS
     best: tuple[int, str] | None = None
-    for pat in CONCLUSION_PATTERNS:
+    for pat in explicit:
         for m in pat.finditer(text):
             if best is None or m.start(1) > best[0]:
                 best = (m.start(1), m.group(1).lower())
+    if best is None:
+        m = final_word.search(text)
+        best = None if m is None else (m.start(1), m.group(1).lower())
     return None if best is None else best[1] == "yes"
 
 

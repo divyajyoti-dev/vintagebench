@@ -1,6 +1,6 @@
 # VintageBench pilot results (v1, RTDSM)
 
-Run `runs/20261102-015654/` (local only; see "Reproduce"). It covers 45 tasks, 4 model
+Run `runs/20261102-031916/` (local only; see "Reproduce"). It covers 45 tasks, 4 model
 configs and 3 trials, so 135 episodes per config and 540 in all, plus a memorization
 probe of 45 calls per config. Data: Philadelphia Fed Real-Time Data Set for
 Macroeconomists (data/NOTICE.md). All numbers are aggregates; no data values are
