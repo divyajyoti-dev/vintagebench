@@ -72,7 +72,7 @@ common because many replies use 0.95 or 0.99.
   0.91–0.98, although its first-release conclusions flip in 17/115 (14.8%) instances.
 - **Reasoning on did not improve discrimination.** AUC went from 0.61 to 0.58
   (`gpt-6-sol`) and from 0.64 to 0.60 (`gpt-6-luna`); differences this size are within
-  noise at n = 60/75 with many ties. Survival Brier improved for `gpt-6-luna`
+  noise at n = 60/75 (59/74 for `gpt-6-luna` / medium) with many ties. Survival Brier improved for `gpt-6-luna`
   (0.424 → 0.374) and was flat for `gpt-6-sol` (0.339 → 0.343).
 
 ## 4. Memorization probe (no tools)
@@ -223,6 +223,6 @@ python -m vintagebench.run --models config/models.yaml --tasks tasks/v1.jsonl --
 python -m vintagebench.run --models config/models.yaml --tasks tasks/v1.jsonl --trials 3 --probe
 ```
 
-The full run was graded once and then re-graded from the response cache at no cost,
+The full run was graded, then re-graded twice from the response cache at no cost,
 after grader-only fixes (probe tolerance, the contradiction regex and leakage decimals)
 that left prompts unchanged.
