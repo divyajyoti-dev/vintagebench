@@ -330,9 +330,14 @@ def _loads_or_raw(s: Any) -> Any:
         return {"_raw": s}
 
 
-def iter_json_objects(text: str) -> list[dict[str, Any]]:
-    """All top-level JSON objects found in ``text`` (fenced blocks, prose, bare JSON)."""
-    decoder = json.JSONDecoder()
+def iter_json_objects(text: str, *, raw_numbers: bool = False) -> list[dict[str, Any]]:
+    """All top-level JSON objects found in ``text`` (fenced blocks, prose, bare JSON).
+
+    ``raw_numbers`` keeps JSON numbers as their original tokens (str), e.g. "237.110".
+    """
+    decoder = (
+        json.JSONDecoder(parse_float=str, parse_int=str) if raw_numbers else json.JSONDecoder()
+    )
     found: list[dict[str, Any]] = []
     candidates = [m.group(1) for m in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.S)]
     candidates.append(text)
